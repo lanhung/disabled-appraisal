@@ -1,6 +1,6 @@
 import { providerResultSchema, resultSchema } from './contracts.js';
 import { catalogs } from './catalog.js';
-import { canonicalMissingMaterials, parseNumber } from './facts.js';
+import { canonicalMissingMaterials, parseNumber, sourceReferenceMatches } from './facts.js';
 
 const grades = {
   injury: ['重伤一级', '重伤二级', '轻伤一级', '轻伤二级', '轻微伤'],
@@ -11,8 +11,238 @@ export const includesEvidence = (source, quote) => Boolean(quote?.trim()) && nor
 
 function officialCondition(condition, clauseText) {
   const modelText = normalize(condition.replace(/[（(][^）)]*[）)]/g, ''));
+  const fullClause = clauseText.trim().replace(/[。]$/, '');
+  if (modelText.includes(normalize(fullClause))) return fullClause;
   return clauseText.split(/[；;。]/).map(value => value.trim().replace(/[，,、：:]$/g, ''))
-    .filter(Boolean).find(fragment => modelText.includes(normalize(fragment))) || null;
+    .filter(Boolean).find(fragment => modelText.includes(normalize(fragment))
+      || simpleAlternatives(fragment)?.alternatives.some(alternative => modelText.includes(normalize(alternative)))) || null;
+}
+
+function semicolonAlternatives(clauseText) {
+  const alternatives = clauseText.split(/[；;]/).map(value => value.trim().replace(/[。]$/, '')).filter(Boolean);
+  if (alternatives.length < 2 || alternatives.some(value => /[，,]|并|且|以及|同时|合并|伴|和|与/.test(value))) return null;
+  return alternatives;
+}
+
+function simpleAlternatives(clauseText) {
+  const text = clauseText.trim().replace(/[。；;]$/, '');
+  if (/[，,；;]|并|且|以及|同时|合并|伴|和|与/.test(text)) return null;
+  const parts = text.split(/或者|或/).map(value => value.trim()).filter(Boolean);
+  return parts.length === 2 ? { text, alternatives: parts } : null;
+}
+
+function conditionsSatisfyClause(conditions, clauseText) {
+  if (!conditions.length) return false;
+  const semicolonGroups = semicolonAlternatives(clauseText);
+  if (semicolonGroups) {
+    const fullClause = clauseText.trim().replace(/[。]$/, '');
+    if (conditions.some(condition => normalize(condition.condition) === normalize(fullClause) && condition.met === true)) return true;
+    return semicolonGroups.some(branch => conditions.some(condition => normalize(condition.condition) === normalize(branch) && condition.met === true));
+  }
+  const alternatives = simpleAlternatives(clauseText);
+  if (!alternatives) return conditions.every(condition => condition.met === true);
+  const grouped = conditions.filter(condition => normalize(condition.condition) === normalize(alternatives.text));
+  return grouped.some(condition => condition.met === true);
+}
+
+function compositeConditionSupported(conditionText, facts, certainties = ['reported', 'observed', 'derived']) {
+  const evidence = facts.filter(fact => certainties.includes(fact.certainty)
+    && fact.source === 'description' && fact.verification === 'quoted').map(fact => fact.evidence);
+  const semicolonGroups = semicolonAlternatives(conditionText);
+  if (semicolonGroups) return semicolonGroups.some(branch => compositeConditionSupported(branch, facts, certainties));
+  const alternatives = simpleAlternatives(conditionText);
+  if (alternatives) return alternatives.alternatives.some(alternative => evidence.some(quote => includesEvidence(quote, alternative)));
+  const parts = conditionText.split(/[，,]|并且|并有|合并|同时|伴有|且|并/);
+  const requiredParts = parts.map(value => value.trim()).filter(Boolean);
+  if (requiredParts.length > 1) return requiredParts.every(part => compositeConditionSupported(part, facts, certainties));
+  return evidence.some(quote => includesEvidence(quote, conditionText));
+}
+
+function explicitRibSiteCountStatus(conditionText, evidence) {
+  const threshold = conditionText.match(/(\d+|[零〇一二两三四五六七八九十百]+)\s*处以上/);
+  const count = evidence.match(/(?:共|累计)?\s*(\d+|[零〇一二两三四五六七八九十百]+)\s*处/);
+  if (!threshold || !count) return undefined;
+  const thresholdValue = parseNumber(threshold[1]);
+  const countValue = parseNumber(count[1]);
+  return Number.isInteger(thresholdValue) && Number.isInteger(countValue) ? countValue >= thresholdValue : undefined;
+}
+
+const reliableCertainties = new Set(['reported', 'observed', 'derived']);
+const sameValue = (left, right) => JSON.stringify(left) === JSON.stringify(right);
+
+function predicateEvidenceValue(predicate, fact) {
+  if (!Number.isFinite(fact.value)) return null;
+  const number = '(\\d+(?:\\.\\d+)?|[零〇一二两三四五六七八九十百]+)';
+  const unit = predicate.unit ? predicate.unit.replace(/[.*+?^${}()|[\]\\]/g, '\\$&') : '';
+  const match = fact.evidence.match(new RegExp(`${number}\\s*${unit}`));
+  if (!match) return null;
+  const sourceValue = parseNumber(match[1]);
+  return Number.isFinite(sourceValue) && sourceValue === fact.value ? sourceValue : null;
+}
+
+function comparePredicate(predicate, value) {
+  if (predicate.operator === 'eq') return value === predicate.value;
+  if (predicate.operator === 'gt') return value > predicate.value;
+  if (predicate.operator === 'gte') return value >= predicate.value;
+  if (predicate.operator === 'lt') return value < predicate.value;
+  if (predicate.operator === 'lte') return value <= predicate.value;
+  return null;
+}
+
+function evaluateConditionLeaf(node, facts) {
+  const candidates = facts.filter(fact => fact.field === (node.factMatch?.field || node.predicate?.field)
+    && fact.source === 'description' && fact.verification === 'quoted');
+  const relevant = candidates.filter(fact => {
+    if (node.factMatch) {
+      const valueMatches = node.factMatch.values.some(value => sameValue(value, fact.value));
+      const exactEvidence = includesEvidence(fact.evidence, node.sourceText);
+      const ribFractureEvidence = node.factMatch.field === 'injury_type'
+        && node.factMatch.values.includes('rib_fracture') && normalize(node.sourceText) === normalize('肋骨骨折')
+        && /肋骨/.test(fact.evidence) && /骨折/.test(fact.evidence);
+      return valueMatches && (exactEvidence || ribFractureEvidence);
+    }
+    return predicateEvidenceValue(node.predicate, fact) !== null;
+  });
+  const positive = relevant.filter(fact => reliableCertainties.has(fact.certainty));
+  const excluded = relevant.filter(fact => fact.certainty === 'excluded');
+  const uncertain = relevant.some(fact => ['uncertain', 'unknown', 'conflicted'].includes(fact.certainty));
+  if (positive.length && excluded.length || uncertain) return { met: null, evidence: '', factIds: [] };
+  if (node.predicate && positive.length) {
+    const states = positive.map(fact => comparePredicate(node.predicate, predicateEvidenceValue(node.predicate, fact)));
+    if (states.some(state => state === null) || new Set(states).size > 1) return { met: null, evidence: '', factIds: [] };
+    return { met: states[0], evidence: positive.map(fact => fact.evidence).join('；'), factIds: positive.map(fact => fact.id) };
+  }
+  if (positive.length) return { met: true, evidence: positive.map(fact => fact.evidence).join('；'), factIds: positive.map(fact => fact.id) };
+  if (excluded.length) return { met: false, evidence: excluded.map(fact => fact.evidence).join('；'), factIds: excluded.map(fact => fact.id) };
+  return { met: null, evidence: '', factIds: [] };
+}
+
+function combineLogicResults(op, results, eventId = null) {
+  const states = results.map(result => result.met);
+  let met = op === 'all'
+    ? states.includes(false) ? false : states.every(state => state === true) ? true : null
+    : states.includes(true) ? true : states.every(state => state === false) ? false : null;
+  if (eventId === null && op === 'all' && met === true) met = null;
+  const decisive = op === 'all' && met === false ? results.filter(result => result.met === false)
+    : op === 'any' && met === true ? results.filter(result => result.met === true)
+      : results;
+  return { met, evidence: decisive.map(result => result.evidence).filter(Boolean).join('；'),
+    factIds: [...new Set(decisive.flatMap(result => result.factIds))], eventId };
+}
+
+export function evaluateConditionLogic(conditionLogic, facts) {
+  if (conditionLogic?.annotation !== 'explicit' || !conditionLogic.logic || !Array.isArray(facts)) {
+    return { met: null, evidence: '', factIds: [] };
+  }
+  const evaluate = (node, scopedFacts, eventId) => {
+    if (node.op === 'condition') return evaluateConditionLeaf(node, scopedFacts);
+    if (node.op === 'all' || node.op === 'any') {
+      return combineLogicResults(node.op, node.children.map(child => evaluate(child, scopedFacts, eventId)), eventId);
+    }
+    return { met: null, evidence: '', factIds: [] };
+  };
+  const eventIds = [...new Set(facts.map(fact => fact.eventId).filter(Boolean))].sort();
+  const unscopedFacts = facts.filter(fact => !fact.eventId);
+  const scopes = [...eventIds.map(eventId => ({ eventId, facts: facts.filter(fact => fact.eventId === eventId) }))];
+  const conditionFields = new Set();
+  const collectFields = node => {
+    if (node.op === 'condition') conditionFields.add(node.factMatch?.field || node.predicate?.field);
+    else for (const child of node.children || []) collectFields(child);
+  };
+  collectFields(conditionLogic.logic);
+  const relevantUnscopedFacts = unscopedFacts.filter(fact => conditionFields.has(fact.field));
+  if (relevantUnscopedFacts.length || scopes.length === 0) scopes.push({ eventId: null, facts: relevantUnscopedFacts });
+  const results = scopes.map(scope => evaluate(conditionLogic.logic, scope.facts, scope.eventId));
+  return results.find(result => result.met === true)
+    || results.every(result => result.met === false) && results[0]
+    || { met: null, evidence: '', factIds: [] };
+}
+
+function logicGroups(logic) {
+  return logic.op === 'all' ? logic.children : [logic];
+}
+
+function logicGroupText(node) {
+  return node.conditionText || node.sourceText;
+}
+
+function logicNodeTexts(node) {
+  return [node.conditionText, node.sourceText].filter(value => typeof value === 'string').map(normalizeLogicLabel);
+}
+
+function normalizeLogicLabel(value) {
+  return normalize(value.replace(/[。；;，,]+$/g, ''));
+}
+
+function collectLogicNodes(node, ancestors = [], output = []) {
+  const nextAncestors = node.op === 'all' || node.op === 'any' ? [...ancestors, node] : ancestors;
+  if (node.op === 'condition') output.push({ node, ancestors: nextAncestors });
+  else for (const child of node.children || []) collectLogicNodes(child, nextAncestors, output);
+  return output;
+}
+
+function evaluateLogicNode(node, facts) {
+  return evaluateConditionLogic({ annotation: 'explicit', logic: node }, facts);
+}
+
+function bindExplicitGroups(clause, proposedConditions, facts) {
+  const logic = clause.conditionLogic.logic;
+  const groups = logicGroups(logic);
+  const bindings = groups.map(() => []);
+  const nodes = collectLogicNodes(logic);
+  const normalizedClause = normalizeLogicLabel(clause.text);
+  let invalid = false;
+  for (const condition of proposedConditions) {
+    const modelText = normalizeLogicLabel(condition.condition || '');
+    const exactGroups = groups.map((group, index) => logicNodeTexts(group).includes(modelText) ? index : -1).filter(index => index >= 0);
+    const exactNodes = nodes.filter(({ node }) => logicNodeTexts(node).includes(modelText));
+    const factIds = Array.isArray(condition.factIds) ? [...new Set(condition.factIds)] : [];
+    if (factIds.some(id => !facts.some(fact => fact.id === id))) invalid = true;
+    const linkedFacts = factIds.map(id => facts.find(fact => fact.id === id)).filter(Boolean)
+      .filter(fact => fact.field !== 'prior_injury');
+    if (modelText === normalizedClause) {
+      for (const bucket of bindings) bucket.push({ condition, linkedFacts });
+    } else if (exactGroups.length > 1) {
+      invalid = true;
+    } else if (exactGroups.length === 1) {
+      bindings[exactGroups[0]].push({ condition, linkedFacts });
+    } else if (exactNodes.length) {
+      const mapped = new Set();
+      for (const { node, ancestors } of exactNodes) {
+        const owner = [...ancestors].reverse().find(candidate => groups.includes(candidate)) || node;
+        const index = groups.indexOf(owner);
+        if (index >= 0) mapped.add(index);
+      }
+      if (mapped.size === 1) bindings[[...mapped][0]].push({ condition, linkedFacts });
+      else invalid = true;
+    } else invalid = true;
+  }
+
+  const groupResults = groups.map((group, index) => {
+    const entries = bindings[index];
+    const uniqueTexts = new Set(entries.map(entry => normalize(entry.condition.condition || '')));
+    if (!entries.length || uniqueTexts.size !== entries.length) {
+      if (entries.length && uniqueTexts.size !== entries.length) invalid = true;
+      return { met: null, evidence: '', factIds: [] };
+    }
+    const groupFacts = [...new Map(entries.flatMap(entry => entry.linkedFacts).map(fact => [fact.id, fact])).values()];
+    const result = evaluateLogicNode(group, groupFacts);
+    return result;
+  });
+  const rootFacts = [...new Map(bindings.flat().flatMap(entry => entry.linkedFacts).map(fact => [fact.id, fact])).values()];
+  const root = evaluateConditionLogic(clause.conditionLogic, rootFacts);
+  const allGroupsBound = bindings.every(entries => entries.length > 0);
+  const met = allGroupsBound && !invalid ? root.met : null;
+  const displayGroups = groups.length <= 12 ? groups : [logic];
+  const displayResults = groups.length <= 12 ? groupResults : [met === null ? { met: null, evidence: '', factIds: [] } : root];
+  return {
+    invalid,
+    met,
+    evidence: root.evidence,
+    factIds: root.factIds,
+    conditions: displayGroups.map((group, index) => ({ condition: logicGroupText(group),
+      evidence: displayResults[index].evidence, factIds: displayResults[index].factIds, met: displayResults[index].met })),
+  };
 }
 
 function evaluateRibCondition(condition, facts) {
@@ -36,6 +266,15 @@ function evaluateRibCondition(condition, facts) {
 function deterministicRibReferences(clauses, facts, sourceUrl) {
   const candidates = clauses.flatMap(clause => {
     if (!/肋骨骨折/.test(clause.text)) return [];
+    if (clause.conditionLogic) {
+      const evaluated = evaluateConditionLogic(clause.conditionLogic, facts);
+      const groups = logicGroups(clause.conditionLogic.logic);
+      const conditions = groups.map(group => {
+        const result = evaluateLogicNode(group, facts);
+        return { condition: logicGroupText(group), evidence: result.evidence, factIds: result.factIds, met: result.met };
+      });
+      return [{ clause, condition: clause.text, met: evaluated.met, relevantFacts: facts, conditions, evidence: evaluated.evidence }];
+    }
     const condition = clause.text.split(/[；;。]/).map(value => value.trim()).find(value => /肋骨骨折/.test(value));
     if (!condition) return [];
     const met = evaluateRibCondition(condition, facts);
@@ -45,16 +284,16 @@ function deterministicRibReferences(clauses, facts, sourceUrl) {
       && relevantFields.includes(fact.field));
     return [{ clause, condition, met, relevantFacts }];
   });
-  return candidates.map(({ clause, condition, met, relevantFacts }) => {
+  return candidates.map(({ clause, condition, met, relevantFacts, conditions: evaluatedConditions, evidence: evaluatedEvidence }) => {
     const gradeRank = grades.injury.indexOf(clause.grade);
     const hasHigherIncompleteClause = candidates.some(candidate => grades.injury.indexOf(candidate.clause.grade) < gradeRank
       && candidate.met === null);
     const relation = met === true ? (hasHigherIncompleteClause ? 'differential' : 'supports') : 'incomplete';
-    const evidence = relevantFacts[0]?.evidence || '';
+    const evidence = evaluatedEvidence || relevantFacts[0]?.evidence || '';
     return { ...clause, sourceUrl, evidence,
       reasoning: relation === 'differential' ? '较重条款所需条件尚未确认，本条仅作对照。'
         : met === true ? '可回查事实与本地条文条件相符。' : '材料原文尚不能完整支持本条条件，需补充或核对。',
-      relation, conditions: [{ condition, evidence, factIds: relevantFacts.map(fact => fact.id), met }] };
+      relation, conditions: evaluatedConditions || [{ condition, evidence, factIds: relevantFacts.map(fact => fact.id), met }] };
   }).sort((a, b) => a.id.localeCompare(b.id, 'en'));
 }
 
@@ -89,10 +328,19 @@ export function normalizeResult(raw, input, context) {
       warnings.push('部分事实无法在提交材料中回查，已移除，不能作为等级依据。');
       continue;
     }
-    facts.push({ ...fact, finding: fact.finding || `${fact.field}：${Array.isArray(fact.value) ? fact.value.join('、') : String(fact.value ?? '')}`,
+    const sourceRefs = Array.isArray(fact.sourceRefs)
+      ? fact.sourceRefs.filter(reference => sourceReferenceMatches(reference, { description: input.description, recognizedText }))
+      : undefined;
+    if (Array.isArray(fact.sourceRefs) && !sourceRefs.length) {
+      warnings.push('事实来源无法对应到原始文本或图片页，已移除，不能作为等级依据。');
+      continue;
+    }
+    if (sourceRefs && sourceRefs.length !== fact.sourceRefs.length) warnings.push('部分事实来源无法对应到原始页面，已移除无效来源链接。');
+    facts.push({ ...fact, ...(sourceRefs ? { sourceRefs } : {}), finding: fact.finding || `${fact.field}：${Array.isArray(fact.value) ? fact.value.join('、') : String(fact.value ?? '')}`,
       verification: fact.source === 'image' ? 'image_pending' : 'quoted' });
   }
   let invalidReference = unknownInlineCitation;
+  let invalidRibConditionMapping = false;
   if (unknownInlineCitation) warnings.push('部分自由文本引用不在本次原文依据中，已不采纳其结论。');
   const references = [];
   for (const proposed of generated.references) {
@@ -100,6 +348,30 @@ export function normalizeResult(raw, input, context) {
     if (!clause) {
       invalidReference = true;
       warnings.push(`条款 ${proposed.clauseId} 不在本次官方原文依据中，已移除。`);
+      continue;
+    }
+    if (clause.grade && clause.conditionLogic?.annotation === 'opaque') {
+      references.push({ ...clause, sourceUrl: standard.sourceUrl,
+        evidence: includesEvidence(sourceText, proposed.evidence) ? proposed.evidence : '',
+        reasoning: '本条款的条件逻辑尚未完成安全标注，状态保持未知，不用于当前定级。', relation: 'incomplete',
+        conditions: [{ condition: clause.text, evidence: '', factIds: [], met: null }] });
+      continue;
+    }
+    if (clause.grade && clause.conditionLogic?.annotation === 'explicit') {
+      const bound = bindExplicitGroups(clause, proposed.conditions, facts);
+      if (bound.invalid) {
+        if (/肋骨骨折/.test(clause.text)) invalidRibConditionMapping = true;
+        else {
+          invalidReference = true;
+          warnings.push(`条款 ${clause.id} 的条件组存在重复或未映射文本，未用于等级判断。`);
+        }
+      }
+      const confirmed = bound.met === true;
+      references.push({ ...clause, sourceUrl: standard.sourceUrl,
+        evidence: includesEvidence(sourceText, proposed.evidence) ? proposed.evidence : bound.evidence,
+        reasoning: confirmed ? '来源可回查事实满足本地条款的显式逻辑条件。' : '材料原文尚不能完整支持本条逻辑条件，需补充或核对。',
+        relation: proposed.relation === 'differential' ? 'differential' : confirmed ? 'supports' : 'incomplete',
+        conditions: bound.conditions });
       continue;
     }
     const conditions = proposed.conditions.map(condition => {
@@ -113,28 +385,50 @@ export function normalizeResult(raw, input, context) {
       const referencedFacts = factIds.map(id => facts.find(fact => fact.id === id)).filter(Boolean);
       const matchedFacts = [...new Map([...referencedFacts, ...facts.filter(fact => fact.source === 'description'
         && (includesEvidence(fact.evidence, condition.evidence) || includesEvidence(condition.evidence, fact.evidence)))]
-        .map(fact => [fact.id, fact])).values()];
-      const boundEvidence = referencedFacts.find(fact => fact.source === 'description' && includesEvidence(sourceText, fact.evidence))?.evidence
+        .map(fact => [fact.id, fact])).values()].filter(fact => fact.field !== 'prior_injury');
+      const boundEvidence = referencedFacts.find(fact => fact.field !== 'prior_injury' && fact.source === 'description' && includesEvidence(sourceText, fact.evidence))?.evidence
         || condition.evidence;
       const traceable = includesEvidence(sourceText, boundEvidence);
       const requiresSiteCount = /处数|\d+\s*处|[一二两三四五六七八九十]+\s*处/.test(conditionText);
       const relevantFacts = requiresSiteCount ? matchedFacts.filter(fact => fact.field === 'fracture_site_count') : matchedFacts;
-      const explicitSiteEvidence = requiresSiteCount && /(?:共|累计)?\s*(?:\d+|[零〇一二两三四五六七八九十百]+)\s*处/.test(boundEvidence);
+      const historicalEvidence = referencedFacts.some(fact => fact.field === 'prior_injury')
+        || /(?:既往(?:史)?|曾经|曾有|陈旧性?|旧伤)/.test(boundEvidence);
+      const explicitSiteStatus = requiresSiteCount && !historicalEvidence
+        ? explicitRibSiteCountStatus(conditionText, boundEvidence) : undefined;
+      const explicitSiteEvidence = requiresSiteCount && matchedFacts.length > 0 && explicitSiteStatus === true;
       const reliableFact = relevantFacts.some(fact => ['reported', 'observed', 'derived'].includes(fact.certainty)
         && fact.source === 'description' && fact.verification === 'quoted');
-      const factBacked = condition.met === true ? (reliableFact || explicitSiteEvidence && traceable) : relevantFacts.length > 0;
-      const ribCondition = evaluateRibCondition(conditionText, matchedFacts);
+      const explicitlyExcludedFact = relevantFacts.some(fact => fact.certainty === 'excluded'
+        && fact.source === 'description' && fact.verification === 'quoted');
+      const factBacked = condition.met === true ? (reliableFact || explicitSiteEvidence && traceable)
+        : condition.met === false ? explicitlyExcludedFact && compositeConditionSupported(conditionText, matchedFacts, ['excluded'])
+          : relevantFacts.length > 0;
+      const evaluatedRibCondition = evaluateRibCondition(conditionText, matchedFacts);
+      const ribCondition = evaluatedRibCondition === null && explicitSiteStatus !== undefined
+        ? explicitSiteStatus : evaluatedRibCondition;
       const met = canonicalCondition
         ? (ribCondition !== undefined && ribCondition !== null ? ribCondition
-          : traceable && factBacked ? condition.met : null)
+          : traceable && factBacked && !(condition.met === true
+            && !compositeConditionSupported(conditionText, matchedFacts))
+            ? condition.met : null)
         : null;
       return { ...condition, condition: canonicalCondition || condition.condition,
         evidence: traceable && matchedFacts.length ? boundEvidence : '',
-        ...(factIds.length ? { factIds: factIds.filter(id => facts.some(fact => fact.id === id)) } : {}),
+        ...(factIds.length ? { factIds: factIds.filter(id => facts.some(fact => fact.id === id && fact.field !== 'prior_injury')) } : {}),
         met };
     });
+    const alternatives = semicolonAlternatives(clause.text) || simpleAlternatives(clause.text)?.alternatives;
+    if (alternatives) {
+      const citedFactIds = new Set(conditions.flatMap(condition => condition.factIds || []));
+      const allAlternativesExcluded = alternatives.every(alternative => facts.some(fact => citedFactIds.has(fact.id)
+        && fact.certainty === 'excluded' && fact.source === 'description' && fact.verification === 'quoted'
+        && includesEvidence(fact.evidence, alternative)));
+      if (!allAlternativesExcluded) {
+        for (const condition of conditions) if (condition.met === false) condition.met = null;
+      }
+    }
     const aggregateTraceable = includesEvidence(sourceText, proposed.evidence);
-    const confirmed = conditions.length > 0 && conditions.every(condition => condition.met === true);
+    const confirmed = conditionsSatisfyClause(conditions, clause.text);
     if (!aggregateTraceable && proposed.relation === 'supports' && confirmed) {
       warnings.push('部分条款汇总引用未能逐字回查，已用逐项核对的材料原文替代。');
     }
@@ -149,9 +443,12 @@ export function normalizeResult(raw, input, context) {
     && fact.source === 'description' && fact.verification === 'quoted');
   const stableRibReferences = !requiresReview && hasReliableRibFact
     ? deterministicRibReferences(context.clauses, facts, standard.sourceUrl) : [];
+  if (invalidRibConditionMapping && !requiresReview && !stableRibReferences.length) {
+    invalidReference = true;
+    warnings.push('肋骨条款条件组存在重复或未映射文本，且无法由已核验事实重新评估。');
+  }
   if (stableRibReferences.length) {
     references.splice(0, references.length, ...references.filter(reference => !/肋骨骨折/.test(reference.text)), ...stableRibReferences);
-    invalidReference = false;
   }
   if (requiresReview) references.splice(0, references.length);
   let status = generated.status;
@@ -161,7 +458,9 @@ export function normalizeResult(raw, input, context) {
   const supportedReference = references.find(reference => grades[input.assessmentType].includes(reference.grade)
     && (stableRibReferences.length > 0 || generated.grade == null || generated.grade === reference.grade)
     && reference.relation === 'supports' && reference.conditions.length > 0
-    && reference.conditions.every(condition => condition.met === true));
+    && (reference.conditionLogic?.annotation === 'explicit'
+      ? evaluateConditionLogic(reference.conditionLogic, facts.filter(fact => reference.conditions.some(condition => condition.factIds?.includes(fact.id)))).met === true
+      : conditionsSatisfyClause(reference.conditions, reference.text)));
   const explicitAlternativeStandard = /工伤|劳动能力鉴定|保险合同|保险条款/.test(input.description);
   if (!requiresReview && !supportedReference) {
     if (status === 'needs_review') status = 'insufficient';
@@ -235,7 +534,11 @@ export function normalizeResult(raw, input, context) {
       ...stableReferences);
   }
   references.sort((a, b) => Number(!a.grade) - Number(!b.grade) || a.id.localeCompare(b.id, 'en'));
-  for (const reference of references) reference.conditions.sort((a, b) => a.condition.localeCompare(b.condition, 'zh-CN'));
+  for (const reference of references) {
+    if (reference.conditionLogic?.annotation !== 'explicit') {
+      reference.conditions.sort((a, b) => a.condition.localeCompare(b.condition, 'zh-CN'));
+    }
+  }
   if (recognizedText) warnings.push('图片识别内容可能存在遗漏或误读，请核对原报告后使用。');
   const stableSummary = status === 'needs_review'
     ? '材料中存在需要复核的冲突或不确定事实，暂不输出等级。'

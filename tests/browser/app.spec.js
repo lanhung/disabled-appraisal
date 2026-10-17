@@ -28,7 +28,13 @@ for (const type of ['injury', 'disability']) {
     let count = 0;
     await page.route('**/api/analyze', route => {
       count++;
-      return count === 1 ? route.fulfill({ status: 503, headers: { 'x-request-id': 'failed-request-test' }, json: { error: { message: '当前分析模型不可用。' } } }) : route.fulfill({ json: { result: resultFixture(type) } });
+      if (count === 1) return route.fulfill({ status: 503, headers: { 'x-request-id': 'failed-request-test' }, json: { error: { message: '当前分析模型不可用。' } } });
+      const result = resultFixture(type);
+      result.facts[0] = { ...result.facts[0], source: 'image', sourceRefs: [
+        { source: 'image', sourceId: 'image-1', evidence: result.facts[0].evidence },
+        { source: 'image', sourceId: 'image-2', evidence: result.facts[0].evidence },
+      ] };
+      return route.fulfill({ json: { result } });
     });
     await open(page);
     await page.getByRole('textbox', { name: '病历与检查记录' }).fill(inputs[type].description);
@@ -39,11 +45,15 @@ for (const type of ['injury', 'disability']) {
     expect(await page.evaluate(kind => localStorage.getItem(`appraisal_${kind}_history_v2`), type)).toBeNull();
     await page.getByRole('button', { name: '重试', exact: true }).click();
     await expect(page.locator('.conclusion h3')).toHaveText(`初步考虑：${type === 'injury' ? '轻伤二级' : '九级伤残'}`);
+    await expect(page.locator('.fact-list')).toContainText('图片1');
+    await expect(page.locator('.fact-list')).toContainText('图片2');
     await page.getByRole('button', { name: '保存到本机', exact: true }).click();
     await page.getByRole('tab', { name: /本机记录/ }).click();
     await expect(page.locator('.history-row')).toHaveCount(1);
     await page.locator('.history-row').click();
     await expect(page.locator('.report')).toBeVisible();
+    await expect(page.locator('.fact-list')).toContainText('图片1');
+    await expect(page.locator('.fact-list')).toContainText('图片2');
     const download = page.waitForEvent('download');
     await page.getByRole('button', { name: '下载报告' }).click();
     expect((await download).suggestedFilename()).toContain(type);

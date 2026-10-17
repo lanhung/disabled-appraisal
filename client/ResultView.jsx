@@ -1,6 +1,6 @@
 import React, { useState } from 'react';
 import { AlertTriangle, Check, CheckCircle2, ClipboardCopy, Download, ExternalLink, FileText, Loader2, Printer, RotateCcw, Save } from 'lucide-react';
-import { downloadReport, reportText } from './report.js';
+import { downloadReport, reportText, sourceReferenceSummary } from './report.js';
 
 const statusNames = { preliminary: '初步评估', insufficient: '材料不足', needs_review: '需复核', not_applicable: '标准不适用' };
 const certaintyNames = { reported: '材料陈述', observed: '已观察', derived: '规则推导', uncertain: '不确定', excluded: '已排除', conflicted: '存在冲突', unknown: '待核实' };
@@ -63,10 +63,16 @@ export function ResultView({ result, busy, elapsed, error, onRetry, retryDisable
     </section>}
     <section className="report-section">
       <h3>材料事实 <span className="section-count">{result.facts.length}</span></h3>
-      {result.facts.length ? <div className="fact-list">{result.facts.map((fact, index) => <div className="fact-row" key={index}>
-        <div className="fact-title"><strong>{fact.finding}</strong><span className="source-label">{fact.source === 'image' ? '图片识别 · 待核对' : '描述原文'} · {certaintyNames[fact.certainty]}</span></div>
-        <blockquote>{fact.evidence}</blockquote>
-      </div>)}</div> : <p className="muted">暂无能够回查的明确事实。</p>}
+      {result.facts.length ? <div className="fact-list">{result.facts.map((fact, index) => {
+        const sourceSummary = sourceReferenceSummary(fact);
+        return <div className="fact-row" key={index}>
+          <div className="fact-title"><strong>{fact.finding}</strong><span className="source-label">
+            {fact.source === 'image' ? '图片识别 · 待核对' : '描述原文'} · {certaintyNames[fact.certainty]}
+            {sourceSummary ? ` · 来源：${sourceSummary}` : ''}
+          </span></div>
+          <blockquote>{fact.evidence}</blockquote>
+        </div>;
+      })}</div> : <p className="muted">暂无能够回查的明确事实。</p>}
     </section>
     <section className="report-section">
       <h3>官方条款对照 <span className="section-count">{result.references.length}</span></h3>

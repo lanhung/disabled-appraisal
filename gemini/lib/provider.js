@@ -2,10 +2,41 @@ import { z } from 'zod';
 import { normalizeFactExtractionResponse } from './facts.js';
 
 export class ServiceError extends Error {
-  constructor(status, code, message) { super(message); this.status = status; this.code = code; }
+  constructor(status, code, message, metadata = {}) {
+    super(message);
+    this.status = status;
+    this.code = code;
+    this.upstreamStatus = metadata.upstreamStatus;
+    this.retryAfterSeconds = metadata.retryAfterSeconds;
+  }
 }
 
-export function createProvider(config, fetchImpl = fetch) {
+function parseRetryAfter(value) {
+  if (typeof value !== 'string' || !value.trim()) return null;
+  const trimmed = value.trim();
+  if (/^\d+$/.test(trimmed)) return Number(trimmed);
+  const date = Date.parse(trimmed);
+  return Number.isNaN(date) ? null : Math.max(0, (date - Date.now()) / 1000);
+}
+
+function waitForRetry(milliseconds, signal) {
+  if (signal?.aborted) return Promise.reject(signal.reason || new Error('Request aborted'));
+  return new Promise((resolve, reject) => {
+    const finish = () => {
+      clearTimeout(timer);
+      signal?.removeEventListener('abort', abort);
+    };
+    const abort = () => {
+      finish();
+      reject(signal.reason || new Error('Request aborted'));
+    };
+    const timer = setTimeout(() => { finish(); resolve(); }, milliseconds);
+    signal?.addEventListener('abort', abort, { once: true });
+    if (signal?.aborted) abort();
+  });
+}
+
+export function createProvider(config, fetchImpl = fetch, waitImpl = waitForRetry) {
   async function complete({ model, schema, name, messages, signal, repair = false }) {
     const jsonSchema = z.toJSONSchema(schema);
     const format = config.jsonMode === 'object' ? { type: 'json_object' } : {
@@ -20,26 +51,41 @@ export function createProvider(config, fetchImpl = fetch) {
       payload.thinking = { type: config.thinking };
       if (Number.isFinite(config.temperature)) payload.temperature = config.temperature;
     }
+    const init = { method: 'POST',
+      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${config.apiKey}` },
+      body: JSON.stringify(payload), signal };
     let response;
-    try {
-      response = await fetchImpl(config.apiUrl, { method: 'POST',
-        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${config.apiKey}` },
-        body: JSON.stringify(payload), signal });
-    } catch {
-      if (signal?.aborted) throw signal.reason;
-      throw new ServiceError(502, 'UPSTREAM_CONNECTION', '暂时无法连接分析服务，请稍后重试。');
+    let attempts = 0;
+    while (true) {
+      try { response = await fetchImpl(config.apiUrl, init); } catch {
+        if (signal?.aborted) throw signal.reason;
+        throw new ServiceError(502, 'UPSTREAM_CONNECTION', '暂时无法连接分析服务，请稍后重试。');
+      }
+      if (response.status !== 429) break;
+      const retryAfter = parseRetryAfter(response.headers.get('retry-after'));
+      if (attempts === 0 && retryAfter !== null && retryAfter <= 2) {
+        attempts += 1;
+        await waitImpl(retryAfter * 1000, signal);
+        continue;
+      }
+      response.body?.cancel().catch(() => {});
+      throw new ServiceError(503, 'UPSTREAM_RATE_LIMIT', '分析请求触发上游限流，请稍后重试。', {
+        upstreamStatus: response.status, retryAfterSeconds: retryAfter,
+      });
+    }
+    if (!response.ok) {
+      const status = response.status;
+      response.body?.cancel().catch(() => {});
+      const metadata = { upstreamStatus: status };
+      if (status === 404) throw new ServiceError(503, 'MODEL_UNAVAILABLE', '当前分析模型不可用，请联系管理员检查模型配置。', metadata);
+      if (status === 401 || status === 403) throw new ServiceError(503, 'PROVIDER_CONFIGURATION', '分析服务的账户配置异常，请联系管理员。', metadata);
+      if (status >= 500) throw new ServiceError(503, 'UPSTREAM_FAILURE', '分析服务上游暂时不可用，请稍后重试。', metadata);
+      throw new ServiceError(502, 'UPSTREAM_REJECTED', '分析服务未接受本次材料，请检查图片和描述后重试。', metadata);
     }
     let body;
     try { body = await response.json(); } catch {
       if (signal?.aborted) throw signal.reason;
       throw new ServiceError(502, 'UPSTREAM_FORMAT', '分析服务返回了无法识别的响应，请稍后重试。');
-    }
-    if (!response.ok) {
-      const status = response.status;
-      if (status === 404) throw new ServiceError(503, 'MODEL_UNAVAILABLE', '当前分析模型不可用，请联系管理员检查模型配置。');
-      if (status === 401 || status === 403) throw new ServiceError(503, 'PROVIDER_CONFIGURATION', '分析服务的账户配置异常，请联系管理员。');
-      if (status === 429 || status >= 500) throw new ServiceError(503, 'UPSTREAM_BUSY', '分析服务暂时繁忙，请稍后重试。');
-      throw new ServiceError(502, 'UPSTREAM_REJECTED', '分析服务未接受本次材料，请检查图片和描述后重试。');
     }
     const choice = body.choices?.[0];
     if (choice?.finish_reason === 'length') throw new ServiceError(502, 'OUTPUT_TRUNCATED', '分析回复未完成，请精简材料或分批上传报告后重试。');

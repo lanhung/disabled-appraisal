@@ -1,0 +1,139 @@
+{
+  "version": 1,
+  "clauses": {
+    "injury": {
+      "5.1.2.c": {
+        "annotation": "explicit",
+        "logic": {
+          "op": "all",
+          "children": [
+            {
+              "op": "any",
+              "sourceText": "颅骨凹陷性或者粉碎性骨折",
+              "children": [
+                {
+                  "op": "condition",
+                  "sourceText": "颅骨凹陷性",
+                  "conditionText": "颅骨凹陷性骨折",
+                  "factMatch": { "field": "injury_type", "values": ["skull_depressed_fracture"] }
+                },
+                {
+                  "op": "condition",
+                  "sourceText": "粉碎性骨折",
+                  "conditionText": "颅骨粉碎性骨折",
+                  "factMatch": { "field": "injury_type", "values": ["skull_comminuted_fracture"] }
+                }
+              ]
+            },
+            {
+              "op": "condition",
+              "sourceText": "出现脑受压症状和体征",
+              "conditionText": "出现脑受压症状和体征",
+              "factMatch": { "field": "diagnosis", "values": ["出现脑受压症状和体征"] }
+            },
+            {
+              "op": "condition",
+              "sourceText": "须手术治疗",
+              "conditionText": "须手术治疗",
+              "factMatch": { "field": "treatment", "values": ["须手术治疗"] }
+            }
+          ]
+        }
+      },
+      "5.1.3.c": {
+        "annotation": "explicit",
+        "logic": {
+          "op": "any",
+          "sourceText": "颅骨凹陷性或者粉碎性骨折",
+          "children": [
+            {
+              "op": "condition",
+              "sourceText": "颅骨凹陷性",
+              "conditionText": "颅骨凹陷性骨折",
+              "factMatch": { "field": "injury_type", "values": ["skull_depressed_fracture"] }
+            },
+            {
+              "op": "condition",
+              "sourceText": "粉碎性骨折",
+              "conditionText": "颅骨粉碎性骨折",
+              "factMatch": { "field": "injury_type", "values": ["skull_comminuted_fracture"] }
+            }
+          ]
+        }
+      },
+      "5.6.4.b": {
+        "annotation": "explicit",
+        "logic": {
+          "op": "all",
+          "children": [
+            {
+              "op": "condition",
+              "sourceText": "肋骨骨折",
+              "conditionText": "肋骨骨折",
+              "factMatch": { "field": "injury_type", "values": ["rib_fracture"] }
+            },
+            {
+              "op": "condition",
+              "sourceText": "2处以上",
+              "conditionText": "骨折处数2处以上",
+              "predicate": { "field": "fracture_site_count", "operator": "gte", "value": 2, "unit": "处" }
+            }
+          ]
+        }
+      },
+      "5.6.3.c": {
+        "annotation": "explicit",
+        "logic": {
+          "op": "all",
+          "children": [
+            {
+              "op": "condition",
+              "sourceText": "肋骨骨折",
+              "conditionText": "肋骨骨折",
+              "factMatch": { "field": "injury_type", "values": ["rib_fracture"] }
+            },
+            {
+              "op": "condition",
+              "sourceText": "6处以上",
+              "conditionText": "骨折处数6处以上",
+              "predicate": { "field": "fracture_site_count", "operator": "gte", "value": 6, "unit": "处" }
+            }
+          ]
+        }
+      },
+      "5.6.5.a": {
+        "annotation": "explicit",
+        "logic": {
+          "op": "any",
+          "sourceText": "肋骨骨折；肋软骨骨折。",
+          "conditionText": "肋骨骨折或肋软骨骨折",
+          "children": [
+            {
+              "op": "condition",
+              "sourceText": "肋骨骨折",
+              "conditionText": "肋骨骨折",
+              "factMatch": { "field": "injury_type", "values": ["rib_fracture"] }
+            },
+            {
+              "op": "condition",
+              "sourceText": "肋软骨骨折",
+              "conditionText": "肋软骨骨折",
+              "factMatch": { "field": "injury_type", "values": ["costal_cartilage_fracture"] }
+            }
+          ]
+        }
+      }
+    },
+    "disability": {
+      "5.9.4.2": {
+        "annotation": "explicit",
+        "logic": {
+          "op": "condition",
+          "sourceText": "脾部分切除术",
+          "conditionText": "脾部分切除术后",
+          "factMatch": { "field": "treatment", "values": ["partial_splenectomy", "脾部分切除术"] }
+        }
+      }
+    }
+  }
+}

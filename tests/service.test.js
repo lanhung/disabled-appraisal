@@ -22,7 +22,16 @@ const provider = { complete: async request => request.name === 'fact_extraction'
 const post = (url, input, signal) => fetch(url + '/api/analyze', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(input), signal });
 
 test('analysis returns validated result and legacy envelope; live and ready are separate', async () => {
-  await withApp({ provider }, async url => {
+  const evidence = 'CT报告明确记载左侧第3、4肋骨骨折，共2处骨折，均为本次外伤导致，无既往损伤。';
+  const source = 'CT报告明确记载左侧第3、4肋骨骨折';
+  const assessmentProvider = { ...provider, complete: async request => request.name === 'fact_extraction'
+    ? { facts: [
+      { id: 'F1', field: 'injury_type', value: 'rib_fracture', certainty: 'reported', source: 'description', evidence: source, eventId: 'E1' },
+      { id: 'F2', field: 'fracture_site_count', value: 2, certainty: 'reported', source: 'description', evidence: '共2处骨折', eventId: 'E1' },
+    ], missingMaterials: [], conflicts: [], requiresReview: false }
+    : providerFixture() };
+  assert.equal(inputs.injury.description, evidence);
+  await withApp({ provider: assessmentProvider }, async url => {
     const response = await post(url, inputs.injury); assert.equal(response.status, 200);
     const body = await response.json(); assert.equal(body.result.grade, '轻伤二级');
     assert.equal(JSON.parse(body.candidates[0].content.parts[0].text).grade, '轻伤二级');
@@ -161,13 +170,72 @@ test('provider adapts both observed Kimi conflict-object shapes into the strict 
 });
 
 test('upstream status errors never expose provider response bodies', async () => {
-  const cases = [[401, 'PROVIDER_CONFIGURATION'], [403, 'PROVIDER_CONFIGURATION'], [404, 'MODEL_UNAVAILABLE'], [429, 'UPSTREAM_BUSY'], [503, 'UPSTREAM_BUSY']];
+  const cases = [[401, 'PROVIDER_CONFIGURATION'], [403, 'PROVIDER_CONFIGURATION'], [404, 'MODEL_UNAVAILABLE'], [429, 'UPSTREAM_RATE_LIMIT'], [503, 'UPSTREAM_FAILURE']];
   for (const [status, code] of cases) {
     const mocked = createProvider(config, async () => Response.json({ error: { message: 'upstream secret payload' } }, { status }));
     await assert.rejects(mocked.complete({ model: 'kimi-k2.6', schema: providerResultSchema, name: 'assessment_result', messages: [] }), error => {
       assert.equal(error.code, code); assert.equal(error.message.includes('secret'), false); return true;
     });
   }
+});
+
+test('provider retries one 429 after the upstream one-second Retry-After and returns the result', async () => {
+  let calls = 0;
+  const waits = [];
+  const completion = { status: 'preliminary', grade: null, summary: 's', reasoning: 'r', facts: [],
+    references: [], missingMaterials: [], nextSteps: [], warnings: [] };
+  const mocked = createProvider(config, async () => {
+    calls += 1;
+    if (calls === 1) return new Response('throttled', { status: 429, headers: { 'Retry-After': '1' } });
+    return Response.json({ choices: [{ finish_reason: 'stop', message: { content: JSON.stringify(completion) } }] });
+  }, async milliseconds => { waits.push(milliseconds); });
+
+  const result = await mocked.complete({ model: 'kimi-k2.6', schema: providerResultSchema,
+    name: 'assessment_result', messages: [] });
+
+  assert.equal(result.grade, null);
+  assert.equal(calls, 2);
+  assert.deepEqual(waits, [1000]);
+});
+
+test('provider does not retry 429 without a short Retry-After or retry 5xx', async () => {
+  for (const [status, headers, code] of [
+    [429, {}, 'UPSTREAM_RATE_LIMIT'],
+    [429, { 'Retry-After': '3' }, 'UPSTREAM_RATE_LIMIT'],
+    [503, { 'Retry-After': '1' }, 'UPSTREAM_FAILURE'],
+  ]) {
+    let calls = 0;
+    const mocked = createProvider(config, async () => {
+      calls += 1;
+      return new Response('upstream secret payload', { status, headers });
+    }, async () => assert.fail('unexpected retry delay'));
+
+    await assert.rejects(mocked.complete({ model: 'kimi-k2.6', schema: providerResultSchema,
+      name: 'assessment_result', messages: [] }), error => {
+      assert.equal(error.code, code);
+      assert.equal(error.upstreamStatus, status);
+      assert.equal(error.message.includes('secret'), false);
+      return true;
+    });
+    assert.equal(calls, 1);
+  }
+});
+
+test('provider retries a short 429 at most once and preserves the final upstream status', async () => {
+  let calls = 0;
+  const mocked = createProvider(config, async () => {
+    calls += 1;
+    return new Response('upstream secret payload', { status: 429, headers: { 'Retry-After': '0' } });
+  }, async () => {});
+
+  await assert.rejects(mocked.complete({ model: 'kimi-k2.6', schema: providerResultSchema,
+    name: 'assessment_result', messages: [] }), error => {
+    assert.equal(error.code, 'UPSTREAM_RATE_LIMIT');
+    assert.equal(error.upstreamStatus, 429);
+    assert.equal(error.retryAfterSeconds, 0);
+    return true;
+  });
+  assert.equal(calls, 2);
 });
 
 test('ordinary identical requests reuse validated results; forceReanalysis bypasses the cache', async () => {

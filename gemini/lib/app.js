@@ -132,6 +132,8 @@ export function createApp(config, options = {}) {
     const status = known ? error.status : malformed || uploadAborted ? 400 : tooLarge ? 413 : unsupported ? 415 : 500;
     const code = known ? error.code : malformed ? 'INVALID_JSON' : tooLarge ? 'PAYLOAD_TOO_LARGE' : uploadAborted ? 'UPLOAD_INTERRUPTED' : unsupported ? 'UNSUPPORTED_ENCODING' : 'INTERNAL_ERROR';
     console.error(JSON.stringify({ event: 'error', requestId: req.requestId, code, status,
+      upstreamStatus: known ? error.upstreamStatus : undefined,
+      retryAfterSeconds: known ? error.retryAfterSeconds : undefined,
       method: req.method, route: req.route?.path || 'unmatched', errorType: error.type || error.name || 'Error' }));
     if (res.destroyed) return;
     res.status(status).json({ error: { code, message: known ? error.message : malformed ? '请求内容不是有效JSON。' : tooLarge ? '提交材料过大，请压缩图片或分批上传。' : uploadAborted ? '材料上传已中断，请检查网络后重新提交。' : unsupported ? '请求编码不受支持，请重新提交材料。' : '分析服务暂时异常，请稍后重试。', requestId: req.requestId } });

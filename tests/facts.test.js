@@ -28,6 +28,57 @@ test('rib ordinal, number of ribs, and fracture sites remain distinct', () => {
   assert.equal(sixRibs.some(fact => fact.field === 'fractured_rib_numbers'), false);
 });
 
+test('explicit fracture-site counts are recognized before and after the rib fracture wording', () => {
+  const examples = [
+    ['左侧第3肋骨有2处骨折线', 2],
+    ['两处肋骨骨折', 2],
+  ];
+  for (const [text, expected] of examples) {
+    assert.equal(normalizeRibFacts(text).find(fact => fact.field === 'fracture_site_count')?.value, expected, text);
+  }
+});
+
+test('a total fracture-site count applies across comma-separated rib descriptions', () => {
+  const facts = normalizeRibFacts('本次事故后左侧第3肋骨有1处骨折线，左侧第4肋骨有1处骨折线，共2处骨折。既往没有肋骨损伤');
+  assert.equal(facts.find(fact => fact.field === 'fracture_site_count')?.value, 2);
+});
+
+test('a sentence total covering rib and non-rib fractures is not assigned to the rib count', () => {
+  const facts = normalizeRibFacts('左侧第3肋骨有1处骨折线，鼻骨骨折，共2处骨折');
+  assert.equal(facts.some(fact => fact.field === 'fracture_site_count' && fact.value === 2), false);
+  assert.equal(facts.find(fact => fact.field === 'fracture_site_count')?.value, 1);
+});
+
+test('a current rib fracture total does not include a prior rib fracture in the same sentence', () => {
+  const facts = normalizeRibFacts('本次左侧第3肋骨骨折，既往左侧第4肋骨骨折，共2处骨折');
+  assert.equal(facts.some(fact => fact.field === 'fracture_site_count'), false);
+  assert.equal(facts.some(fact => fact.field === 'injury_type' && fact.value === 'rib_fracture'), true);
+  assert.equal(facts.some(fact => fact.field === 'prior_injury' && fact.value === 'rib_fracture'), true);
+});
+
+test('a current fracture cue after a prior-injury denial keeps the new rib fracture current', () => {
+  const facts = normalizeRibFacts('既往没有肋骨损伤但本次左侧第3肋骨骨折');
+  assert.equal(facts.some(fact => fact.field === 'injury_type' && fact.value === 'rib_fracture' && fact.certainty === 'reported'), true);
+  assert.equal(facts.some(fact => fact.field === 'prior_injury'), false);
+});
+
+test('a combined rib and nasal fracture clause does not assign its total to the rib count', () => {
+  const examples = [
+    '左侧第3肋骨骨折并鼻骨骨折，共2处骨折',
+    '左侧第3肋骨骨折并L1椎体压缩性骨折，共2处骨折',
+  ];
+  for (const text of examples) {
+    const facts = normalizeRibFacts(text);
+    assert.equal(facts.some(fact => fact.field === 'fracture_site_count'), false, text);
+    assert.equal(facts.some(fact => fact.field === 'injury_type' && fact.value === 'rib_fracture'), true, text);
+  }
+});
+
+test('rib pain is not parsed as a rib fracture when a different bone fractures in the same clause', () => {
+  const facts = normalizeRibFacts('左侧肋骨区域疼痛伴鼻骨骨折');
+  assert.equal(facts.some(fact => fact.field === 'injury_type' && fact.value === 'rib_fracture'), false);
+});
+
 test('laterality belongs to its own rib clause and later explicit side does not leak', () => {
   const facts = normalizeRibFacts('左侧第3肋骨骨折，右侧第5肋骨骨折');
   assert.deepEqual(facts.filter(fact => fact.field === 'laterality').map(fact => fact.value), ['left', 'right']);

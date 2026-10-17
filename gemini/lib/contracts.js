@@ -57,13 +57,20 @@ export const extractionSchema = z.object({
 });
 
 export const factCertaintySchema = z.enum(['reported', 'observed', 'derived', 'uncertain', 'excluded', 'conflicted', 'unknown']);
+export const factSourceReferenceSchema = z.object({
+  source: z.enum(['description', 'image']),
+  sourceId: z.string().trim().regex(/^(?:description|image-[1-6])$/).nullable(),
+  evidence: shortText,
+});
 export const extractedFactSchema = z.object({
   id: z.string().trim().max(24).optional(),
+  eventId: z.string().trim().regex(/^E[1-9]\d{0,2}$/).nullable().optional(),
   field: z.string().trim().min(1).max(64),
   value: z.json(),
   certainty: factCertaintySchema,
   source: z.enum(['description', 'image']),
   evidence: shortText,
+  sourceRefs: z.array(factSourceReferenceSchema).max(6).optional(),
 });
 export const factConflictSchema = z.object({
   factIds: z.array(z.string().trim().min(1).max(24)).max(30),
