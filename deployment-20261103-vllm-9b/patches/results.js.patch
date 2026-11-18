@@ -1,0 +1,42 @@
+--- a/lib/results.js
++++ b/lib/results.js
+@@ -1715,10 +1715,19 @@
+     && fact.sourceRefs?.some(reference => reference.source === fact.source
+       && includesEvidence(reference.evidence, fact.evidence))
+     && isCanonicalCardiacRuptureEvidence(cardiacRuptureValue, fact.evidence));
+-  const candidates = facts.filter(fact => acceptedFields.has(fact.field)
++  const quotedTermMatches = fact => fact.verification === 'quoted'
++    && node.factMatch?.values?.some(term => {
++      if (typeof term !== 'string' || !term.trim()) return false;
++      const evidence = normalizeForMatching(fact.evidence);
++      const index = evidence.indexOf(normalizeForMatching(term));
++      const negation = /(?:未见|未发现|未提示|未查见|未检查出|未提及|未记载|未出现|没有|不存在|否认|排除|无)[^，,。！？；;、\n]{0,18}$/u;
++      return index >= 0 && !negation.test(evidence.slice(0, index));
++    });
++  const candidates = facts.filter(fact => (acceptedFields.has(fact.field) || quotedTermMatches(fact))
+     && fact.source === 'description'
+     && (fact.verification === 'quoted' || parserQuotedCardiacFact(fact)));
+   const relevant = candidates.filter(fact => {
++    if (quotedTermMatches(fact)) return true;
+     if (isIntracranialCondition(node) && isSpinalEpiduralHematomaFact(fact)) return false;
+     const jointLossEvidence = jointLossRequirement ? largeJointLossEvidence(node, fact.evidence, fact.value) : null;
+     const vertebralEvidence = vertebralRequirement
+@@ -3004,11 +3013,17 @@
+     }
+   }
+   const supportedGradeRank = supportedReference ? grades[input.assessmentType].indexOf(supportedReference.grade) : -1;
++  const clauseHasFactualContact = clause => logicGroups(clause.conditionLogic.logic)
++    .some(group => {
++      const evaluated = evaluateLogicNode(group, facts, clause.conditionLogic.ageAdjustment);
++      return evaluated.met === true;
++    });
+   const unresolvedHigherReviewClauses = supportedGradeRank < 0 ? [] : (context.reviewClauseIds || [])
+     .map(id => catalogs[input.assessmentType].clauses.find(clause => clause.id === id))
+     .filter(clause => clause?.grade && grades[input.assessmentType].indexOf(clause.grade) < supportedGradeRank
+       && clause.conditionLogic?.annotation === 'explicit'
+-      && evaluateConditionLogic(clause.conditionLogic, facts).met === null);
++      && evaluateConditionLogic(clause.conditionLogic, facts).met === null
++      && clauseHasFactualContact(clause));
+   if (status === 'preliminary' && unresolvedHigherReviewClauses.length) {
+     status = 'insufficient';
+     grade = null;

@@ -1,0 +1,19 @@
+{
+  "name": "gemini",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "start": "node server.js",
+    "check": "node --check server.js"
+  },
+  "engines": {
+    "node": ">=20.19"
+  },
+  "dependencies": {
+    "cors": "^2.8.5",
+    "dotenv": "^17.2.3",
+    "express": "^5.2.1",
+    "minisearch": "7.2.0",
+    "zod": "4.6.7"
+  }
+}

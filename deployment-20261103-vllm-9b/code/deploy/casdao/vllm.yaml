@@ -1,0 +1,24 @@
+model: /root/fshare/models/Qwen/Qwen3.5-9B
+served-model-name: qwen3.5-9b
+host: 127.0.0.1
+port: 8000
+dtype: bfloat16
+max-model-len: 131072
+gpu-memory-utilization: 0.90
+max-num-seqs: 2
+max-num-batched-tokens: 4096
+enforce-eager: true
+limit-mm-per-prompt:
+  image: 6
+  video: 0
+mm-processor-kwargs:
+  size:
+    longest_edge: 5760000
+    shortest_edge: 65536
+default-chat-template-kwargs:
+  enable_thinking: false
+reasoning-parser: qwen3
+generation-config: vllm
+seed: 0
+enable-prefix-caching: true
+# install.sh adds the private API key to the installed copy.

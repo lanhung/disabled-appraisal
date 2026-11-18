@@ -1,0 +1,22 @@
+--- a/lib/facts.js
++++ b/lib/facts.js
+@@ -5260,6 +5260,19 @@
+         reasonCode = 'not_confirmed';
+       } else {
+         reasonCode = 'canonicalization_rejected';
++        const negated = /(?:未(?:见|发现|出现|提示|查见|检查出|诉|提及|记录|记载|描述|说明)|没有|不存在|否认|阴性|排除|不(?:伴|存在|是|属于)|并非|无)/u
++          .test(`${rawFact.value} ${rawFact.evidence}`);
++        if (typeof rawFact.value === 'string' && rawFact.value.trim() && facts.length < MAX_NORMALIZED_FACTS && !negated) {
++          const fact = { id: `F${facts.length + 1}`, field: 'clinical_finding', value: rawFact.value,
++            certainty: rawFact.certainty, source: rawFact.source, evidence: rawFact.evidence, verification: 'quoted',
++            sourceRefs: sourceRefsForFact(rawFact.source, evidence, sourceText), rawIds: [rawFact.id],
++            ...(rawFact.eventId ? { eventId: rawFact.eventId } : {}),
++            finding: factFinding('clinical_finding', rawFact.value, rawFact.certainty) };
++          facts.push(fact);
++          normalizedFactIds.push(fact.id);
++          rawIdToFinalIds.set(rawFact.id, [fact.id]);
++          reasonCode = null;
++        }
+       }
+     }
+     return {

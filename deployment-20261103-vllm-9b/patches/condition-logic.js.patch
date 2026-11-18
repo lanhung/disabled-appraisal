@@ -1,0 +1,42 @@
+--- a/lib/condition-logic.js
++++ b/lib/condition-logic.js
+@@ -112,22 +112,37 @@
+   const remainingUnscopedFacts = unscopedFacts.filter(fact => !linkedFacts.has(fact));
+   const scopes = [...eventIds.map(eventId => ({ eventId, facts: facts.filter(fact => fact.eventId === eventId) }))];
+   const conditionFields = new Set();
++  const conditionTerms = new Set();
++  const collectFactMatchTerms = factMatch => {
++    for (const term of [...(factMatch?.values || []), ...(factMatch?.valueIncludes || []),
++      ...(factMatch?.evidenceAliases || [])])
++      if (typeof term === 'string' && term.trim()) conditionTerms.add(term);
++  };
+   const collectFields = node => {
+     if (node.op === 'condition') {
+       for (const field of conditionFactFields(node.factMatch, node.predicate)) conditionFields.add(field);
++      collectFactMatchTerms(node.factMatch);
+     }
+     if (node.confirmedBy) {
+       for (const field of conditionFactFields(node.confirmedBy)) conditionFields.add(field);
++      collectFactMatchTerms(node.confirmedBy);
+     }
+     for (const child of node.children || []) collectFields(child);
+   };
+   collectFields(conditionLogic.logic);
+   const supportingFactIds = new Set(facts.filter(fact => conditionFields.has(fact.field))
+     .flatMap(fact => fact.derivedFrom || []));
++  const termEvidenceMatch = fact => fact.source === 'description' && fact.verification === 'quoted'
++    && [...conditionTerms].some(term => {
++      const evidence = normalizeForMatching(fact.evidence);
++      const index = evidence.indexOf(normalizeForMatching(term));
++      const negation = /(?:未见|未发现|未提示|未查见|未检查出|未提及|未记载|未出现|没有|不存在|否认|排除|无)[^，,。！？；;、\n]{0,18}$/u;
++      return index >= 0 && !negation.test(evidence.slice(0, index));
++    });
+   const relevantUnscopedFacts = unscopedFacts.filter(fact => conditionFields.has(fact.field)
+-    || supportingFactIds.has(fact.id));
++    || supportingFactIds.has(fact.id) || termEvidenceMatch(fact));
+   for (const scope of scopes) scope.facts.push(...(linkedUnscopedFacts.get(scope.eventId) || [])
+-    .filter(fact => conditionFields.has(fact.field) || supportingFactIds.has(fact.id)));
++    .filter(fact => conditionFields.has(fact.field) || supportingFactIds.has(fact.id) || termEvidenceMatch(fact)));
+   const remainingRelevantFacts = relevantUnscopedFacts.filter(fact => remainingUnscopedFacts.includes(fact));
+   if (eventIds.length === 0) scopes.push({ eventId: null, facts: remainingRelevantFacts });
+   const results = scopes.map(scope => evaluate(conditionLogic.logic, scope.facts, scope.eventId));

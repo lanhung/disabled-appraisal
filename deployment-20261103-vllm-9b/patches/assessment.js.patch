@@ -1,0 +1,57 @@
+--- a/lib/assessment.js
++++ b/lib/assessment.js
+@@ -91,10 +91,35 @@
+     if (pages.length !== input.images.length) extractionWarnings.push('部分图片没有得到完整转录，请核对或补充文字报告。');
+   }
+ 
++  const sourceText = `${input.description}\n${recognizedText}`;
++  const extractionClauses = retrieveClauses(input.assessmentType, sourceText, 40);
++  const extractionPhrases = new Map();
++  let extractionPhraseCount = 0;
++  const collectExtractionPhrases = node => {
++    const match = node?.factMatch;
++    const phrases = [...new Set([...(match?.values || []), ...(match?.valueIncludes || []),
++      ...(match?.evidenceAliases || [])].filter(value => typeof value === 'string' && value.trim()))];
++    for (const field of new Set([match?.field, ...(match?.fields || [])].filter(Boolean))) {
++      for (const phrase of phrases) {
++        if (extractionPhraseCount >= 80) break;
++        const values = extractionPhrases.get(field) || new Set();
++        if (!values.has(phrase)) {
++          values.add(phrase);
++          extractionPhrases.set(field, values);
++          extractionPhraseCount += 1;
++        }
++      }
++    }
++    for (const child of node?.children || []) collectExtractionPhrases(child);
++  };
++  for (const clause of extractionClauses.slice(0, 15)) collectExtractionPhrases(clause.conditionLogic?.logic);
++  const extractionPhraseList = [...extractionPhrases].map(([field, values]) => `${field}: ${[...values].join('|')}`).join('\n');
++  const extractionFieldHint = `候选条款核验所需事实清单（字段名: 可接受取值短语，| 分隔）：\n${extractionPhraseList}\n凡原文中出现与上述某短语对应的伤情表述（允许带部位、程度、测量值等修饰前缀的同义表述，例如原文“顶部2.2cm头皮瘢痕”对应短语“头皮瘢痕”），必须另输出一条独立事实：field 填该字段名，value 逐字填该短语本身，evidence 填原文对应引文。仅当原文确有对应表述时才输出，不得虚构。`;
++
+   const factResponse = await complete({ model: config.textModel, schema: factExtractionSchema,
+     name: 'fact_extraction', signal, messages: [
+       { role: 'system', content: `${FACT_EXTRACTION_PROMPT}\n\n${STRUCTURED_MEASUREMENT_PROMPT}${input.injuryDate
+-        ? `\n\n${SELECTED_INJURY_DATE_CONTEXT_PROMPT}` : ''}\n\n输出版本：${FACT_EXTRACTION_PROMPT_VERSION}` },
++        ? `\n\n${SELECTED_INJURY_DATE_CONTEXT_PROMPT}` : ''}\n\n输出版本：${FACT_EXTRACTION_PROMPT_VERSION}\n\n${extractionFieldHint}` },
+       { role: 'user', content: JSON.stringify({ description: input.description, recognizedText,
+         ...(input.injuryDate ? { assessmentContext: { selectedInjuryDate: input.injuryDate } } : {}) }) },
+     ],
+@@ -109,7 +134,6 @@
+     assessmentPromptVersion: ASSESSMENT_PROMPT_VERSION,
+     codeVersion: config.codeVersion || process.env.APP_CODE_VERSION || process.env.GIT_COMMIT || ASSESSMENT_CODE_VERSION,
+   });
+-  const sourceText = `${input.description}\n${recognizedText}`;
+   let clauses = retrieveClauses(input.assessmentType, extracted.scopeText || sourceText, 40, extracted.facts);
+   const model = config.textModel;
+   const resultContext = { clauses, recognizedText, extractionWarnings, requestId, model,
+@@ -137,8 +161,7 @@
+       || ![...logicFactFields(clause.conditionLogic.logic)].some(field => availableFactFields.has(field))
+       || currentGradeRank >= 0 && gradeOrder[input.assessmentType].indexOf(clause.grade) >= currentGradeRank) return false;
+     const evaluation = evaluateConditionLogic(clause.conditionLogic, deterministicFacts);
+-    return evaluation.met === true || evaluation.met === null
+-      && (evaluation.factIds.length > 0 || hasQuotedConditionEvidence(clause, deterministicFacts));
++    return evaluation.met === true || evaluation.met === null;
+   });
+   const pendingIds = new Set([...pendingReferences.map(reference => reference.id),
+     ...semanticCandidates.map(clause => clause.id)]);
