@@ -1,4 +1,5 @@
 import { z } from 'zod';
+import { assessmentToday } from './assessment-date.js';
 
 const text = z.string().trim().max(8000);
 const shortText = z.string().trim().max(1000);
@@ -20,7 +21,7 @@ export const requestSchema = z.object({
   if (!value.description && !value.images.length) {
     context.addIssue({ code: 'custom', message: '请填写病历内容或上传报告图片。' });
   }
-  if (value.injuryDate && value.injuryDate > new Date().toISOString().slice(0, 10)) {
+  if (value.injuryDate && value.injuryDate > assessmentToday()) {
     context.addIssue({ code: 'custom', path: ['injuryDate'], message: '受伤日期不能晚于今天。' });
   }
 });
@@ -57,13 +58,37 @@ export const extractionSchema = z.object({
 });
 
 export const factCertaintySchema = z.enum(['reported', 'observed', 'derived', 'uncertain', 'excluded', 'conflicted', 'unknown']);
+export const factSourceReferenceSchema = z.object({
+  source: z.enum(['description', 'image']),
+  sourceId: z.string().trim().regex(/^(?:description|image-[1-6])$/).nullable(),
+  evidence: shortText,
+  normalizedStart: z.number().int().nonnegative().optional(),
+  normalizedEnd: z.number().int().nonnegative().optional(),
+  positions: z.array(z.object({ normalizedStart: z.number().int().nonnegative(),
+    normalizedEnd: z.number().int().nonnegative() })).min(1).max(200).optional(),
+  positionsComplete: z.boolean().optional(),
+}).superRefine((reference, context) => {
+  const hasStart = Number.isInteger(reference.normalizedStart);
+  const hasEnd = Number.isInteger(reference.normalizedEnd);
+  if (hasStart !== hasEnd || hasStart && reference.normalizedEnd <= reference.normalizedStart) {
+    context.addIssue({ code: 'custom', message: '来源位置必须包含有效的规范化文本起止偏移。' });
+  }
+  if (reference.positions && (hasStart || hasEnd)) {
+    context.addIssue({ code: 'custom', message: '来源位置不能同时使用单点和多点格式。' });
+  }
+  if (reference.positions?.some(position => position.normalizedEnd <= position.normalizedStart)) {
+    context.addIssue({ code: 'custom', message: '重复引文的位置范围无效。' });
+  }
+});
 export const extractedFactSchema = z.object({
   id: z.string().trim().max(24).optional(),
+  eventId: z.string().trim().regex(/^E[1-9]\d{0,2}$/).nullable().optional(),
   field: z.string().trim().min(1).max(64),
   value: z.json(),
   certainty: factCertaintySchema,
   source: z.enum(['description', 'image']),
   evidence: shortText,
+  sourceRefs: z.array(factSourceReferenceSchema).max(200).optional(),
 });
 export const factConflictSchema = z.object({
   factIds: z.array(z.string().trim().min(1).max(24)).max(30),
@@ -93,7 +118,41 @@ export const resultSchema = providerResultSchema.omit({ references: true, facts:
     verification: z.enum(['quoted', 'image_pending']),
     assertedCertainty: factCertaintySchema.optional(),
     derivedFrom: z.array(z.string().trim().min(1).max(24)).max(30).optional(),
+    sourceFactIds: z.array(z.string().trim().min(1).max(24)).max(200).optional(),
   })),
+  factAudit: z.array(z.object({
+    rawFactId: z.string().trim().min(1).max(24),
+    proposedField: z.string().trim().min(1).max(64),
+    field: z.string().trim().min(1).max(64),
+    proposedValue: z.json(),
+    certainty: factCertaintySchema,
+    source: z.enum(['description', 'image']),
+    evidence: shortText,
+    sourceRefs: z.array(factSourceReferenceSchema).max(200).optional(),
+    status: z.enum(['normalized', 'excluded']),
+    reasonCode: z.enum(['source_reference_invalid', 'evidence_not_found', 'out_of_scope',
+      'not_confirmed', 'canonicalization_rejected']).nullable(),
+    normalizedFactIds: z.array(z.string().trim().min(1).max(24)).max(200),
+    gradeEligible: z.boolean(),
+  })).max(400).default([]),
+  analysisSnapshot: z.object({
+    snapshot: shortText,
+    factSchema: shortText,
+    factPrompt: shortText,
+    assessmentPrompt: shortText,
+    rules: shortText,
+    code: shortText,
+    codeHash: z.string().regex(/^[a-f0-9]{64}$/),
+    provider: shortText,
+    textModel: shortText,
+    visionModel: shortText,
+    temperature: z.number().nullable(),
+    thinking: shortText.nullable(),
+    jsonMode: shortText.nullable(),
+    inputDigest: z.string().regex(/^[a-f0-9]{64}$/),
+    factsDigest: z.string().regex(/^[a-f0-9]{64}$/),
+    snapshotId: z.string().regex(/^[a-f0-9]{64}$/),
+  }).optional(),
   conflicts: z.array(factConflictSchema).max(100),
   requiresReview: z.boolean(),
   references: z.array(z.object({
@@ -107,4 +166,11 @@ export const resultSchema = providerResultSchema.omit({ references: true, facts:
   createdAt: z.iso.datetime(),
   requestId: shortText,
   model: shortText,
+});
+
+export const referenceResultSchema = z.object({
+  grade: z.string().trim().max(30).nullable(),
+  clauseId: z.string().trim().max(40).nullable(),
+  confidence: z.enum(['high', 'medium', 'low']).nullable(),
+  reason: z.string().trim().max(300),
 });
