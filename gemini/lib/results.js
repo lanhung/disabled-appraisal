@@ -10,7 +10,8 @@ import { canonicalMissingMaterials, confirmsSixWeekUnhealedTympanicPerforation, 
   explicitScalpScarCountTotal, findExplicitOpenSkullDuralDiagnoses, hasSupportedOpenSkullDuralRuptureEvidence,
   hasExplicitOrbitalFractureEnophthalmosLink, isCanonicalCardiacRuptureEvidence, normalizeMuscleStrengthFacts,
   hasExplicitLimbLengthDifferenceLink, hasVerifiedModerateShockEvidence, parseNumber, quotedDentalDefectCount,
-  sourceReferenceMatches, hasSameEyeInjuryContext } from './facts.js';
+  sourceReferenceMatches, hasSameEyeInjuryContext, hasRibSpecificFractureStatement, sharedInjuryMemberFromQuote,
+  minorClinicalConditionValue, minorClinicalFindingMatchesQuote, hasUnresolvedAnteriorChamberTreatment } from './facts.js';
 import { eventDateAnchorsConflict, eventIdForSelectedInjuryDate, parseEventDateAnchors } from './event-date-logic.js';
 
 export const gradeOrder = {
@@ -1744,7 +1745,33 @@ function evaluateConditionLeaf(node, facts, eventId = null, ageAdjustmentEnabled
   const candidates = facts.filter(fact => (acceptedFields.has(fact.field) || termInEvidence(fact))
     && fact.source === 'description'
     && (fact.verification === 'quoted' || parserQuotedCardiacFact(fact)));
+  const minorValue = !predicate && node.factMatch?.field === 'clinical_finding'
+    && node.factMatch.values?.length === 1 && minorClinicalConditionValue(node.sourceText);
+  const minorCondition = minorValue && minorClinicalConditionValue(node.factMatch.values[0]) === minorValue ? minorValue : null;
   const relevant = candidates.filter(fact => {
+    // A normalized finding here needs the whole documented site and tissue.
+    // The suffix shortcut below cannot tell a knee from an eyelid.
+    if (minorCondition) {
+      return acceptedFields.has(fact.field) && (minorClinicalFindingMatchesQuote(fact.value, fact.evidence, minorCondition)
+        || fact.certainty === 'excluded' && conditionFactIsExplicitlyNegated(node, fact));
+    }
+    const claimsSharedFracture = fact.sharedFracturePredicate === true;
+    const sharedMember = (claimsSharedFracture || fact.certainty === 'derived' || fact.assertedCertainty === 'derived')
+      && sharedInjuryMemberFromQuote(fact.evidence, fact.value);
+    if (claimsSharedFracture && !sharedMember) return false;
+    if (sharedMember) {
+      // This quote proves each parsed member, not any term that happens to
+      // occur on a sibling inside the quote. Keep all special requirements.
+      if (!node.factMatch || !acceptedFields.has(fact.field) || predicate || jointLossRequirement || vertebralRequirement
+        || visualFieldRule || completeVisionRule || hearingRule || earSideRule || requiresCurrentProcedureLink(node)
+        || evidenceLabelsFindingAsHistorical(fact.evidence, node.sourceText)) return false;
+      const value = normalize(fact.value);
+      const unsided = value.replace(/^(?:左侧|右侧|双侧)/u, '');
+      return (node.factMatch.values || []).some(term => typeof term === 'string'
+        && [value, unsided].includes(normalize(term).replace(/^两侧/u, '双侧')))
+        || (node.factMatch.valueIncludes || []).some(term => typeof term === 'string' && term.trim()
+          && value.includes(normalize(term).replace(/^两侧/u, '双侧')));
+    }
     if (quotedTermMatches(fact)) return true;
     if (isIntracranialCondition(node) && isSpinalEpiduralHematomaFact(fact)) return false;
     const jointLossEvidence = jointLossRequirement ? largeJointLossEvidence(node, fact.evidence, fact.value) : null;
@@ -1791,13 +1818,10 @@ function evaluateConditionLeaf(node, facts, eventId = null, ageAdjustmentEnabled
         || hearingCausality || Boolean(earSideEvidence?.matched);
       const reducedStrengthSign = normalize(node.conditionText || '') === normalize('神经系统症状和体征')
         && isReducedMuscleStrengthEvidence(fact.evidence);
-      const sharedSuffixEvidence = fact.sharedFracturePredicate === true && fact.field === 'imaging_finding'
-        && valueMatches && /骨折/u.test(fact.evidence);
-      const evidenceAlias = (Boolean(evidenceAliasMatch) || sharedSuffixEvidence)
-        && !historicalEvidence && !evidenceAliasHistorical;
+      const evidenceAlias = Boolean(evidenceAliasMatch) && !historicalEvidence && !evidenceAliasHistorical;
       const ribFractureEvidence = node.factMatch.field === 'injury_type'
         && node.factMatch.values.includes('rib_fracture') && normalize(node.sourceText) === normalize('肋骨骨折')
-        && /肋骨/.test(fact.evidence) && /骨折/.test(fact.evidence) && !historicalEvidence;
+        && hasRibSpecificFractureStatement(fact.evidence) && !historicalEvidence;
       const canonicalEvidence = node.factMatch.field === 'clinical_finding'
         && fact.source === 'description'
         && (fact.verification === 'quoted'
@@ -3055,10 +3079,21 @@ export function normalizeResult(raw, input, context) {
       && clause.conditionLogic?.annotation === 'explicit'
       && evaluateConditionLogic(clause.conditionLogic, facts).met === null
       && clauseHasFactualContact(clause));
-  if (status === 'preliminary' && unresolvedHigherReviewClauses.length) {
+  // Newly recognized surface signs must not settle a documented intraocular
+  // injury for which this standard still needs the eye-specific treatment record.
+  const minorProofIds = status === 'preliminary' && input.assessmentType === 'injury' && grade === '轻微伤'
+    ? references.filter(ref => ref.relation === 'supports' && ref.grade === grade)
+      .flatMap(ref => ref.conditions.filter(condition => condition.met === true)
+        .flatMap(condition => condition.factIds || [])) : [];
+  const unresolvedEyeTreatment = minorProofIds.length > 0 && minorProofIds.every(id =>
+    facts.some(fact => fact.id === id && minorClinicalFindingMatchesQuote(fact.value, fact.evidence)))
+    && hasUnresolvedAnteriorChamberTreatment(input.description, assessmentEventId);
+  if (status === 'preliminary' && (unresolvedHigherReviewClauses.length || unresolvedEyeTreatment)) {
     status = 'insufficient';
     grade = null;
-    missingMaterials.push('核实可能影响等级比较的较高等级条款所需事实后再评估。');
+    if (!unresolvedEyeTreatment) {
+      missingMaterials.push('核实可能影响等级比较的较高等级条款所需事实后再评估。');
+    }
     warnings.push('较高等级候选条款仍有必要条件未核实，暂不输出较低等级。');
     for (const reference of references) {
       if (reference.grade === supportedReference.grade && reference.relation === 'supports') {
@@ -3148,7 +3183,7 @@ export function normalizeResult(raw, input, context) {
         missingMaterials.push('骨折处数未在原文中明确记载，需核实');
       }
       if (excludedOnlyFacts) missingMaterials.splice(0, missingMaterials.length);
-      if (missingMaterials.length === 0) missingMaterials.push('补充与适用条款相关的客观材料。');
+      if (missingMaterials.length === 0 && !unresolvedEyeTreatment) missingMaterials.push('补充与适用条款相关的客观材料。');
     }
   }
   if (!hasValidatedFacts && hearingThresholdMissingMaterials.length && status === 'insufficient') {
@@ -3175,6 +3210,9 @@ export function normalizeResult(raw, input, context) {
     if (!nextSteps.some(step => /窒息征象|呼吸功能/u.test(step))) {
       nextSteps.push('补充颈部、面眼部体征及呼吸功能评估记录，由专业人员核对窒息征象和呼吸功能条件。');
     }
+  }
+  if (unresolvedEyeTreatment) {
+    missingMaterials.push('补充眼科检查或治疗记录，核对本次前房出血或积血是否需要手术治疗。');
   }
   if (input.assessmentType === 'disability' && input.treatmentStatus !== 'stable' && status !== 'preliminary') {
     const timingMaterial = '确认原发损伤及相关并发症已治疗终结或临床效果稳定，并提供相应记录。';

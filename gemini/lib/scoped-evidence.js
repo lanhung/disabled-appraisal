@@ -19,7 +19,7 @@ export function isScopedEvidenceField(field) {
 const sentencePattern = /[^。！？!?；;\n]+[？?]?/gu;
 const nonObservation = /既往|陈旧|旧伤|此前|前次|上次|家族史|家属(?:有|曾|出现|发生)|其父|其母|另(?:一人|一名)|另(?:一次|一起|一场)|不同(?:次|一场)?(?:外伤|受伤|事故)|再次(?:外伤|受伤)|标准(?:原文|条款)|条款(?:原文|要求)|示例|假设|如果|倘若|若(?:有|出现|发现|发生)|如(?:有|出现|发现|发生)|必要时|不归因|外伤前|受伤前|与本次(?:外伤|损伤|事件)无关/u;
 const nonObservationHeading = /^(?:【\s*)?(?:(?:原|既有|历史)?鉴定(?:意见|结论|分析(?:说明)?|结果|标准)|(?:适用|参照)?(?:标准原文|标准条文|条文|条款|规范原文)|历史(?:答案|等级)|既往(?:病|损伤|外伤)?史|家族史)(?:\s*[:：】]|\s*$)/u;
-const observationHeading = /^(?:【\s*)?(?:现病史|主诉|病程记录|治疗经过|手术记录|手术所见|入院记录|出院记录|诊断(?:记录)?|检查结果|影像(?:学)?(?:检查|报告)|体格检查|查体)(?:\s*[:：】]|\s*$)/u;
+const observationHeading = /^(?:【\s*)?(?:现病史|主诉|病程记录|治疗经过|手术记录|手术所见|入院记录|出院记录|诊断(?:记录)?|(?:口腔(?:专科)?|牙科)?检查结果|影像(?:学)?(?:检查|报告)|体格检查|查体)(?:\s*[:：】]|\s*$)/u;
 const assessmentScopeChange = /(?:本次|此次|本项)(?:鉴定|评估)?\s*(?:(?:仅|只)(?:对|评|鉴定|评估|纳入)|不(?:予|做|作|对)?(?:评定|鉴定|评估|纳入|列入))|(?:不纳入|不列入|不用于|不作为|排除在)\s*(?:本次|此次|本项).{0,12}(?:鉴定|评估)/u;
 const unresolvedCorrection = /(?:上述|数值|数据|结果|比例|数量|计数|测量|读数|诊断)[^，,]{0,10}(?:有误|误录|不一致|存在争议|待复核|待核对|待确认)/u;
 const negatingWords = '(?:未见|未发现|未显示|未提示|没有|无|排除|否认)';
@@ -88,15 +88,18 @@ function smallCount(raw) {
 }
 
 const side = label => label?.startsWith('左') ? 'left' : label?.startsWith('右') ? 'right' : null;
-const sideLabel = label => label === '双侧' ? 'both' : side(label);
+const sideLabel = label => /^(?:双侧|两侧)$/u.test(label || '') ? 'both' : side(label);
 const sectionKey = Object.freeze({ 颈椎: 'C', 胸椎: 'T', 腰椎: 'L' });
 const levelLimits = Object.freeze({ C: 7, T: 12, L: 5 });
+const countedJoin = '(?:[,，、]|以及|及|和|与)';
+const countedMemberSplit = /[,，、]|以及|及|和|与/u;
 const spineMember = `(?:[CTL]\\s*)?(?:第\\s*)?${countToken}`;
-const spineList = `${spineMember}(?:\\s*(?:[-–—~～至到、及和])\\s*${spineMember}){0,11}`;
-const spinePattern = new RegExp(`^(?:(左侧?|右侧?|双侧)\\s*)?(颈椎|胸椎|腰椎|[CTL])\\s*(${spineList})\\s*(?:节\\s*)?(?:(左侧?|右侧?|双侧)\\s*)?(横突|棘突|椎弓根|椎弓|椎体)\\s*(?:均|分别|各有)?\\s*(?:有|见)?(?:压缩性?|粉碎性?)?骨折$`, 'iu');
+const spineList = `${spineMember}(?:\\s*(?:[-–—~～至到]|${countedJoin})\\s*${spineMember}){0,11}`;
+const spineObservation = `(?:(左侧?|右侧?|双侧|两侧)\\s*)?(颈椎|胸椎|腰椎|[CTL])\\s*(${spineList})\\s*(?:节\\s*)?(?:(左侧?|右侧?|双侧|两侧)\\s*)?(横突|棘突|椎弓根|椎弓|椎体)\\s*(?:均|分别|各有)?\\s*(?:有|见)?(?:压缩性?|粉碎性?)?骨折`;
+const spinePattern = new RegExp(`^${spineObservation}$`, 'iu');
 function vertebralLevels(raw, region) {
   const members = new Set();
-  for (const member of raw.split(/[、及和]/u)) {
+  for (const member of raw.split(countedMemberSplit)) {
     const range = member.split(/[-–—~～至到]/u);
     if (range.length > 2) return [];
     const numbers = range.map(part => {
@@ -111,8 +114,14 @@ function vertebralLevels(raw, region) {
   return [...members];
 }
 
-const toothPattern = /^(牙位\s*)?([1-4][1-8](?:\s*[、及和]\s*[1-4][1-8])*)\s*(号牙|牙齿|牙)?\s*(?:均|分别)?\s*(脱落|折断|折裂|折)$/u;
-const pelvisPattern = /^(左侧?|右侧?|双侧)\s*(耻骨上支|耻骨下支|髂骨翼)\s*(?:均)?\s*(?:有|见)?(?:粉碎性)?骨折$/u;
+const toothObservation = `(牙位\\s*)?([1-4][1-8](?:\\s*${countedJoin}\\s*[1-4][1-8])*)\\s*(号牙|牙齿|牙)?\\s*(?:均|分别)?\\s*(脱落|折断|折裂|折)`;
+const toothPattern = new RegExp(`^${toothObservation}$`, 'u');
+const pelvicMember = '(?:耻骨上支|耻骨下支|髂骨翼|髋臼|骶骨|坐骨支|髂骨)';
+const pelvisObservation = `(左侧?|右侧?|双侧|两侧)\\s*(${pelvicMember}(?:\\s*${countedJoin}\\s*${pelvicMember})*)\\s*(?:均)?\\s*(?:有|见)?(?:粉碎性)?骨折`;
+const pelvisPattern = new RegExp(`^${pelvisObservation}$`, 'u');
+const commaInCountList = new RegExp(`${spineObservation}|(?<![0-9])${toothObservation}(?![伤线])|${pelvisObservation}`, 'giu');
+const pubicRamiPattern = /^(左侧?|右侧?|双侧|两侧)\s*耻骨(上|下)(?:支)?\s*(?:、|及|和|与)\s*(?:耻骨)?(上|下)支\s*(?:均)?\s*(?:有|见)?(?:粉碎性)?骨折$/u;
+const dentalCountFirst = new RegExp(`^(?:共|合计)?\\s*(${countToken})\\s*(?:枚|颗)\\s*(?:上颌|下颌)?(?:切牙|门牙|前牙|恒牙|牙齿|牙)\\s*(?:均|分别|完全)?\\s*(脱落|脱失|缺失|折断|折裂)$`, 'u');
 const totalPatterns = [
   [toothLoss, new RegExp(`^牙齿(?:脱落|脱失)\\s*(?:共|合计)?\\s*(${countToken})\\s*(?:枚|颗)(以上)?$`, 'u')],
   [toothFracture, new RegExp(`^(?:牙齿(?:折断|折裂)|牙折)\\s*(?:共|合计)?\\s*(${countToken})\\s*(?:枚|颗)(以上)?$`, 'u')],
@@ -137,14 +146,24 @@ function counted(text, state, add) {
   }
   const dental = toothPattern.exec(text);
   if (dental && (dental[1] || dental[3])) {
-    for (const member of dental[2].split(/[、及和]/u).map(item => item.trim())) {
+    for (const member of dental[2].split(countedMemberSplit).map(item => item.trim())) {
       add(dental[4] === '脱落' ? toothLoss : toothFracture, { member, state });
     }
   }
+  const countedDental = dentalCountFirst.exec(text);
+  if (countedDental) {
+    const count = smallCount(countedDental[1]);
+    const field = /^(?:折断|折裂)$/u.test(countedDental[2]) ? toothFracture : toothLoss;
+    if (count > 0) add(field, { minimum: count, exact: true, state });
+  }
   const pelvic = pelvisPattern.exec(text);
-  if (pelvic) {
-    const sides = pelvic[1] === '双侧' ? ['left', 'right'] : [side(pelvic[1])];
-    for (const s of sides) add(pelvis, { member: `${s}:${pelvic[2]}`, state });
+  const pubicRami = pubicRamiPattern.exec(text);
+  if (pelvic || pubicRami) {
+    const label = sideLabel((pelvic || pubicRami)[1]);
+    const sides = label === 'both' ? ['left', 'right'] : [label];
+    const members = pelvic ? pelvic[2].split(countedMemberSplit).map(item => item.trim())
+      : [pubicRami[2], pubicRami[3]].map(part => `耻骨${part}支`);
+    for (const s of sides) for (const member of members) add(pelvis, { member: `${s}:${member}`, state });
   }
   for (const [field, pattern] of totalPatterns) {
     const explicit = pattern.exec(text);
@@ -285,8 +304,8 @@ function limbFracture(item, add) {
 }
 
 const amount = '(\\d{1,3}(?:\\.\\d{1,2})?)';
-const lungMeasurement = new RegExp(`^(左侧?|右侧?|双侧)\\s*肺(?:萎陷|压缩)\\s*(均)?\\s*(?:为|达|是|在)?\\s*(约|大约|估计)?\\s*${amount}\\s*%\\s*(左右|以上|以下|以内)?$`, 'u');
-const pleuralInjury = /^(?:(左侧?|右侧?|双侧)\s*)?(?:创伤性|外伤性)?(?:血气胸|血胸|气胸)\s*[,，]?\s*(?:伴有?|合并|并见)\s*(.+)$/u;
+const lungMeasurement = new RegExp(`^(左侧?|右侧?|双侧|同侧)?\\s*肺(?:组织)?(?:萎陷|压缩)\\s*(均)?\\s*(?:为|达|是|在)?\\s*(约|大约|估计)?\\s*(超过|大于|至少)?\\s*${amount}\\s*%\\s*(左右|以上|以下|以内)?$`, 'u');
+const pleuralInjury = /^(?:(左侧?|右侧?|双侧)\s*)?(?:创伤性|外伤性)?(?:血气胸|液气胸|血胸|气胸)\s*(?:[,，]\s*(?:伴有?|合并|并见)?|伴有?|合并|并见)\s*(.+)$/u;
 function linkedLungMeasurements(sentence, add) {
   const observation = qualified(sentence);
   const link = pleuralInjury.exec(observation.text);
@@ -297,13 +316,15 @@ function linkedLungMeasurements(sentence, add) {
     const measured = lungMeasurement.exec(item.text);
     // A different finding ends the list associated with this pleural injury.
     if (!measured) break;
-    const [, site, distributes, approximation, number, bound] = measured;
+    const [, site, distributes, approximation, lower, number, bound] = measured;
     const value = Number(number);
-    if (value < 0 || value > 100 || site === '双侧' && !distributes || site !== '双侧' && distributes) break;
+    const measuredSide = site && site !== '同侧' ? side(site) : linkedSide;
+    if ((!measuredSide && site !== '双侧') || value < 0 || value > 100 || lower && bound
+      || site === '双侧' && !distributes || site !== '双侧' && distributes) break;
     const state = observation.state !== 'present' ? observation.state
       : approximation || bound && bound !== '以上' ? 'uncertain' : item.state;
-    for (const s of (site === '双侧' ? ['left', 'right'] : [side(site)])) {
-      if (!linkedSide || linkedSide === s) add(lung, { side: s, value, lowerBound: bound === '以上', state });
+    for (const s of (site === '双侧' ? ['left', 'right'] : [measuredSide])) {
+      if (!linkedSide || linkedSide === s) add(lung, { side: s, value, lowerBound: Boolean(lower || bound === '以上'), state });
     }
   }
 }
@@ -359,12 +380,17 @@ function parseStatement(sentence) {
     observations.set(field, entries);
   };
   let qualifiedList = false;
-  let qualifiedLimbList = false;
-  for (const fragment of items) {
+  // A comma between verified members belongs to the list, not to another report.
+  // Keep the original text and offsets for the evidence; only tokenize this copy.
+  const countedItems = countItems(linkedText.replace(commaInCountList, list => list.replace(/[,，]/gu, '、')));
+  for (const fragment of countedItems) {
     const item = qualified(fragment);
     // An unqualified item after a negated or uncertain item may still be under that qualifier.
     counted(item.text, qualifiedList && item.state === 'present' ? 'uncertain' : item.state, add);
     qualifiedList ||= item.state !== 'present';
+  }
+  let qualifiedLimbList = false;
+  for (const fragment of items) {
     const limbItem = qualifiedLimbItem(fragment);
     if (limbItem.independent) qualifiedLimbList = false;
     limbFracture({ ...limbItem, raw: fragment,
