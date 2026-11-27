@@ -3875,6 +3875,34 @@ function normalizeAnonymizedRibFractureFacts(inputText) {
     facts.push({ id: `ARI${match.index}-sites`, field: 'fracture_site_count', value: total,
       certainty: 'reported', source_type: 'user_text', source_excerpt: evidence });
   }
+  // De-identified lists without a stated total, e.g. "第3、某人、某人骨前肋骨折".
+  // Each comma-separated position is one rib; a placeholder is a distinct but
+  // unknown rib, so the list length is a lower bound on the fracture sites.
+  const positionItem = `(?:(?:第\\s*)?${amount}|某人|某某)`;
+  const listed = new RegExp(String.raw`(?<side>${compoundSide})?\s*第\s*(?<first>${amount})`
+    + String.raw`\s*(?<rest>(?:[、,，]\s*${positionItem}\s*)+)`
+    + String.raw`(?:(?:骨\s*)?(?:前肋|后肋|腋肋|肋骨|肋)|骨)\s*(?:新鲜|陈旧)?\s*骨折`, 'gu');
+  for (const match of text.matchAll(listed)) {
+    if (!/(?:某人|某某)/u.test(match.groups.rest || '')
+      || !Number.isInteger(parseNumber(match.groups.first))) continue;
+    const certainty = certaintyFor(text, match.index, match.index + match[0].length);
+    if (certainty !== 'reported' || hasNonCurrentClinicalContext(text, match.index, match.index + match[0].length)) continue;
+    const positions = 1 + (match.groups.rest.match(/[、,，]/gu) || []).length;
+    if (positions < 2) continue;
+    const evidence = match[0].trim();
+    const side = sideScopeFromToken(match.groups.side || '');
+    const countId = `ARL${match.index}-roots`;
+    facts.push({ id: `ARL${match.index}-type`, field: 'injury_type', value: 'rib_fracture',
+      certainty: 'reported', source_type: 'user_text', source_excerpt: evidence });
+    facts.push({ id: `ARL${match.index}-site`, field: 'anatomical_site', value: '肋骨',
+      certainty: 'reported', source_type: 'user_text', source_excerpt: evidence });
+    if (side) facts.push({ id: `ARL${match.index}-side`, field: 'laterality', value: side,
+      certainty: 'reported', source_type: 'user_text', source_excerpt: evidence });
+    facts.push({ id: countId, field: 'fractured_rib_count', value: positions,
+      certainty: 'derived', source_type: 'user_text', source_excerpt: evidence });
+    facts.push({ id: `ARL${match.index}-sites`, field: 'fracture_site_count', value: positions,
+      certainty: 'derived', source_type: 'derived', derived_from: [countId], source_excerpt: evidence });
+  }
   return facts;
 }
 

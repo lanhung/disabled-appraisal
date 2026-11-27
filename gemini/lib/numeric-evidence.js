@@ -4,6 +4,29 @@ import { normalizeForMatching } from './text-normalization.js';
 const normalize = normalizeForMatching;
 const reliableCertainties = new Set(['reported', 'observed', 'derived']);
 
+// A de-identified rib list such as "第3、某人、某人骨前肋骨折" has no stated
+// total and no usable rib ordinals beyond the first. Its length is only a
+// usable lower bound when the list documents at least three positions or at
+// least two placeholder members; a single "第7、某人骨骨折" cannot establish
+// two ribs on its own.
+const deidentifiedRibList = /第\s*[0-9零〇一二两三四五六七八九十百]+\s*(?<rest>(?:[、,，]\s*(?:(?:第\s*)?[0-9零〇一二两三四五六七八九十百]+|(?:某人|某某))\s*)+)(?:(?:骨\s*)?(?:前肋|后肋|腋肋|肋骨|肋)|骨)\s*(?:新鲜|陈旧)?\s*骨折(?<extra>(?:[、,，]\s*(?:某人|某某)\s*(?:(?:骨|前肋|后肋|腋肋|肋骨|肋)\s*)?(?:新鲜|陈旧)?\s*骨折)*)/u;
+
+function deidentifiedRibListProfile(evidence) {
+  const match = deidentifiedRibList.exec(normalize(String(evidence || '')));
+  if (!match?.groups) return null;
+  const rest = match.groups.rest || '';
+  const extra = match.groups.extra || '';
+  const positions = 1 + (rest.match(/[、,，]/gu) || []).length + (extra.match(/[、,，]/gu) || []).length;
+  const placeholders = (rest.match(/(?:某人|某某)/gu) || []).length
+    + (extra.match(/(?:某人|某某)/gu) || []).length;
+  return { positions, placeholders };
+}
+
+function isDeidentifiedRibListEvidence(evidence) {
+  const profile = deidentifiedRibListProfile(evidence);
+  return Boolean(profile && (profile.positions >= 3 || profile.placeholders >= 2));
+}
+
 function verifiedTypedMeasurement(predicate, fact, evidence) {
   const unitPatterns = {
     cm: '(cm|厘米|mm|毫米)(?!2)',
@@ -237,6 +260,27 @@ export function quotedPredicateEvidenceValue(predicate, fact, facts = []) {
       && ['reported', 'observed', 'derived'].includes(parent.certainty)
       && Number.isInteger(parent.value) && parent.value > 0 && parent.eventId === fact.eventId
       && quotedPredicateEvidenceValue({ field: 'fractured_rib_count', unit: '根' }, parent, facts) === parent.value);
+    // Only deterministic, quoted, same-event counts derived from an actual
+    // de-identified placeholder list can support a site count this way. A
+    // model's bare self-reported count never matches this evidence shape.
+    const deidentifiedCountParents = parents.filter(parent => parent?.field === 'fractured_rib_count'
+      && parent.source === 'description' && parent.verification === 'quoted'
+      && parent.certainty === 'derived'
+      && Number.isInteger(parent.value) && parent.value > 0 && parent.eventId === fact.eventId
+      && isDeidentifiedRibListEvidence(parent.evidence));
+    const deidentifiedNumberParents = parents.filter(parent => parent?.field === 'fractured_rib_numbers'
+      && parent.source === 'description' && parent.verification === 'quoted'
+      && parent.certainty === 'derived'
+      && Array.isArray(parent.value) && parent.value.length > 0
+      && parent.value.every(value => Number.isInteger(value) && value > 0)
+      && parent.eventId === fact.eventId
+      && isDeidentifiedRibListEvidence(parent.evidence));
+    const deidentifiedParentCount = deidentifiedCountParents.length + deidentifiedNumberParents.length;
+    const deidentifiedListValue = deidentifiedCountParents.length
+      ? Math.max(...deidentifiedCountParents.map(parent => parent.value))
+      : new Set(deidentifiedNumberParents.flatMap(parent => parent.value)).size;
+    const deidentifiedListSupported = Boolean(fact.eventId) && deidentifiedParentCount === parents.length
+      && deidentifiedListValue > 0 && fact.value === deidentifiedListValue;
     const distinctRibNumbers = new Set(ribNumberParents.flatMap(parent => parent.value));
     const countsBySide = new Map();
     let unspecifiedRootCount = 0;
@@ -252,6 +296,7 @@ export function quotedPredicateEvidenceValue(predicate, fact, facts = []) {
     const upperBound = Math.max(distinctRibNumbers.size * 2, rootCountLowerBound);
     if (fact.eventId && ribNumberParents.length + rootCountParents.length === parents.length
       && lowerBound > 0 && fact.value >= lowerBound && fact.value <= upperBound) return fact.value;
+    if (deidentifiedListSupported) return fact.value;
     return null;
   }
   if (['surface_scar_area_cm2', 'aggregate_surface_scar_area_cm2'].includes(predicate.field)) {
