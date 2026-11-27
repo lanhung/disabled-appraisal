@@ -88,6 +88,15 @@ const MAX_DESC_CHARS_FOR_SINGLE_EXTRACTION = 600;
 // 只影响模型提议；服务端仍对全部候选条款做确定性条件重算，条款内容/条件逻辑不变。
 export const MAX_ASSESSMENT_CLAUSES = 15;
 
+// T-20261127: 8K 小上下文模式（4B/3080 部署用）。只压缩主评估提示的组装，
+// 不改标准、门槛、条件逻辑；服务端仍按完整条款重算。用 COMPACT_ASSESSMENT_CONTEXT=1 开启。
+const COMPACT_ASSESSMENT_MAX_CLAUSES = 8;
+const COMPACT_ASSESSMENT_MAX_FACTS = 20;
+const COMPACT_ASSESSMENT_EVIDENCE_CHARS = 50;
+function compactAssessmentEnabled() {
+  return process.env.COMPACT_ASSESSMENT_CONTEXT === '1';
+}
+
 // 把文本切成长度 ≤ maxLen 的块；各块按顺序拼接后与原字符串完全一致（不丢段、不改原文）。
 function chunkTextKeepAll(text, maxLen) {
   if (text.length <= maxLen) return [text];
@@ -266,7 +275,10 @@ export async function assess(input, { provider, config, signal, requestId, onMet
   if (!pendingIds.size) return deterministicResult;
   const reviewClauses = catalogs[input.assessmentType].clauses.filter(clause => pendingIds.has(clause.id));
   if (!reviewClauses.length) return deterministicResult;
-  const modelReviewClauses = reviewClauses.slice(0, MAX_ASSESSMENT_CLAUSES);
+  const compactAssessment = compactAssessmentEnabled();
+  const modelReviewClauses = reviewClauses.slice(0, compactAssessment
+    ? Math.min(MAX_ASSESSMENT_CLAUSES, COMPACT_ASSESSMENT_MAX_CLAUSES)
+    : MAX_ASSESSMENT_CLAUSES);
   const pendingFactIds = new Set(pendingReferences.flatMap(reference => reference.conditions
     .flatMap(condition => condition.factIds || [])));
   const reviewFields = new Set(reviewClauses.flatMap(clause => [...logicFactFields(clause.conditionLogic.logic)]));
@@ -276,10 +288,23 @@ export async function assess(input, { provider, config, signal, requestId, onMet
   for (const id of pendingFactIds) for (const parentId of factsById.get(id)?.derivedFrom || []) relevantFactIds.add(parentId);
   const targetedFacts = scopedExtractedFacts.filter(fact => relevantFactIds.has(fact.id)
     || availableFactFields.has(fact.field) && reviewFields.has(fact.field));
+  const promptFacts = compactAssessment
+    ? [...targetedFacts.filter(fact => relevantFactIds.has(fact.id)),
+        ...targetedFacts.filter(fact => !relevantFactIds.has(fact.id))]
+        .slice(0, COMPACT_ASSESSMENT_MAX_FACTS)
+        .map(fact => ({
+          id: fact.id,
+          field: fact.field,
+          value: fact.value,
+          evidence: typeof fact.evidence === 'string'
+            ? fact.evidence.slice(0, COMPACT_ASSESSMENT_EVIDENCE_CHARS) : fact.evidence,
+          eventId: fact.eventId,
+        }))
+    : targetedFacts;
   const referencesById = new Map(deterministicResult.references.map(reference => [reference.id, reference]));
   const assessmentInput = {
     assessmentType: input.assessmentType,
-    facts: targetedFacts,
+    facts: promptFacts,
     conflicts: [],
     requiresReview: false,
     missingMaterials: extracted.missingMaterials,
@@ -287,9 +312,12 @@ export async function assess(input, { provider, config, signal, requestId, onMet
     treatmentStatus: input.treatmentStatus,
     reviewConditions: modelReviewClauses.map(clause => {
       const reference = referencesById.get(clause.id);
-      const conditions = reference?.conditions.filter(condition => condition.met === null);
-      return { clauseId: clause.id, conditionLogic: clause.conditionLogic.logic,
-        conditions: conditions?.length ? conditions : [{ condition: clause.text, evidence: '', factIds: [], met: null }] };
+      const pending = reference?.conditions.filter(condition => condition.met === null);
+      const conditions = pending?.length ? pending : [{ condition: clause.text, evidence: '', factIds: [], met: null }];
+      return compactAssessment
+        ? { clauseId: clause.id,
+            conditions: conditions.map(condition => ({ condition: condition.condition, factIds: condition.factIds || [] })) }
+        : { clauseId: clause.id, conditionLogic: clause.conditionLogic.logic, conditions };
     }),
   };
   const reviewedIds = new Set(reviewClauses.map(clause => clause.id));
@@ -297,8 +325,16 @@ export async function assess(input, { provider, config, signal, requestId, onMet
   resultContext.clauses = clauses;
   resultContext.reviewClauseIds = [...reviewedIds];
 
+  const clauseContext = compactAssessment
+    ? JSON.stringify({
+        standard: catalogs[input.assessmentType].standard,
+        clauses: modelReviewClauses.map(clause => ({
+          id: clause.id, grade: clause.grade, category: clause.category, text: clause.text,
+        })),
+      })
+    : catalogContext(input.assessmentType, modelReviewClauses);
   const result = await complete({ model, schema: providerResultSchema, name: 'assessment_result', signal, messages: [
-    { role: 'system', content: `${rules}\n\n${targetedReviewInstruction}\n\n本次评估类型：${input.assessmentType}\n官方原文依据：${catalogContext(input.assessmentType, modelReviewClauses)}` },
+    { role: 'system', content: `${rules}\n\n${targetedReviewInstruction}\n\n本次评估类型：${input.assessmentType}\n官方原文依据：${clauseContext}` },
     { role: 'user', content: `<verified_facts>\n${JSON.stringify(assessmentInput)}\n</verified_facts>` },
   ] });
   try {
